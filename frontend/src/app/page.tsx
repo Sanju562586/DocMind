@@ -51,7 +51,11 @@ import { ApiKeys, Document, Message, Session, Source, MemoryItem } from "@/lib/t
 function loadKeys(): ApiKeys {
   if (typeof window === "undefined") return { gemini: "", groq: "", openrouter: "" };
   try {
-    return JSON.parse(localStorage.getItem("docmind_api_keys") || "{}");
+    const sessionVal = sessionStorage.getItem("docmind_api_keys");
+    if (sessionVal) return JSON.parse(sessionVal);
+    const localVal = localStorage.getItem("docmind_api_keys");
+    if (localVal) return JSON.parse(localVal);
+    return { gemini: "", groq: "", openrouter: "" };
   } catch {
     return { gemini: "", groq: "", openrouter: "" };
   }
@@ -59,7 +63,13 @@ function loadKeys(): ApiKeys {
 
 function saveKeys(keys: ApiKeys) {
   if (typeof window !== "undefined") {
-    localStorage.setItem("docmind_api_keys", JSON.stringify(keys));
+    try {
+      const serialized = JSON.stringify(keys);
+      sessionStorage.setItem("docmind_api_keys", serialized);
+      localStorage.setItem("docmind_api_keys", serialized);
+    } catch (e) {
+      console.warn("Storage quota or access issue:", e);
+    }
   }
 }
 
