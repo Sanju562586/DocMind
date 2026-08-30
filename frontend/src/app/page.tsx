@@ -1,0 +1,1304 @@
+"use client";
+
+import { useState, useEffect, useRef, useCallback } from "react";
+import {
+  FileText,
+  Upload,
+  Sparkles,
+  Layers,
+  Search,
+  BarChart3,
+  Database,
+  Trash2,
+  Plus,
+  Zap,
+  PanelLeft,
+  PanelLeftClose,
+  RefreshCw,
+  Sliders,
+  CheckCircle2,
+  Paperclip,
+  ArrowUp,
+  Cpu,
+  Download,
+  Edit3,
+  X,
+} from "lucide-react";
+import { motion, AnimatePresence } from "framer-motion";
+import Sidebar from "@/components/Sidebar";
+import { MessageBubble, StreamingMessage, TypingIndicator } from "@/components/MessageBubble";
+import EmptyState from "@/components/EmptyState";
+import { ApiKeyModal, DocumentUploadModal } from "@/components/Modals";
+import { GlobalMemoryModal } from "@/components/GlobalMemoryModal";
+import { PipelineModal } from "@/components/PipelineModal";
+import KeyboardShortcutsModal from "@/components/KeyboardShortcutsModal";
+import InteractiveBackground from "@/components/InteractiveBackground";
+import {
+  listSessions,
+  createSession,
+  getSession,
+  getMessages,
+  sendMessage,
+  summarizeSession,
+  deleteDocument,
+  checkBackendHealth,
+  listSessionDocuments,
+  renameSession,
+  uploadDocumentToSession,
+} from "@/lib/api";
+import { ApiKeys, Document, Message, Session, Source, MemoryItem } from "@/lib/types";
+
+function loadKeys(): ApiKeys {
+  if (typeof window === "undefined") return { gemini: "", groq: "", openrouter: "" };
+  try {
+    return JSON.parse(localStorage.getItem("docmind_api_keys") || "{}");
+  } catch {
+    return { gemini: "", groq: "", openrouter: "" };
+  }
+}
+
+function saveKeys(keys: ApiKeys) {
+  if (typeof window !== "undefined") {
+    localStorage.setItem("docmind_api_keys", JSON.stringify(keys));
+  }
+}
+
+function loadSidebarState(): boolean {
+  if (typeof window === "undefined") return true;
+  try {
+    const saved = localStorage.getItem("docmind_sidebar_open");
+    if (saved !== null) return JSON.parse(saved);
+    return window.innerWidth >= 768;
+  } catch {
+    return true;
+  }
+}
+
+function saveSidebarState(isOpen: boolean) {
+  if (typeof window !== "undefined") {
+    localStorage.setItem("docmind_sidebar_open", JSON.stringify(isOpen));
+  }
+}
+
+type ModalType = "none" | "upload" | "settings" | "memory" | "pipeline" | "shortcuts";
+
+export default function HomePage() {
+  const [apiKeys, setApiKeys] = useState<ApiKeys>({ gemini: "", groq: "", openrouter: "" });
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [activeSession, setActiveSession] = useState<Session | null>(null);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [inputValue, setInputValue] = useState("");
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [streamingContent, setStreamingContent] = useState("");
+  const [streamingMemories, setStreamingMemories] = useState<MemoryItem[]>([]);
+  const [modal, setModal] = useState<ModalType>("none");
+  const [isLoadingMessages, setIsLoadingMessages] = useState(false);
+  const [error, setError] = useState("");
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [deletingDocId, setDeletingDocId] = useState<string | null>(null);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [backendStatus, setBackendStatus] = useState<"healthy" | "unreachable" | "checking">("checking");
+  const [isDraggingFile, setIsDraggingFile] = useState(false);
+
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const titleInputRef = useRef<HTMLInputElement>(null);
+  const chatScrollRef = useRef<HTMLDivElement>(null);
+  const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const [editingTitleValue, setEditingTitleValue] = useState("");
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+
+  const showToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => {
+      setToastMessage((current) => (current === msg ? null : current));
+    }, 4500);
+  };
+
+  // ── Load initial data & keyboard shortcuts ──────────────────────────────────
+  useEffect(() => {
+    setApiKeys(loadKeys());
+    setIsSidebarOpen(loadSidebarState());
+    loadSessionsList();
+    verifyHealth();
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const activeTag = (document.activeElement?.tagName || "").toLowerCase();
+      const isInputActive = activeTag === "input" || activeTag === "textarea";
+
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "b") {
+        e.preventDefault();
+        toggleSidebar();
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        handleNewChat();
+      } else if (e.key === "?" && !isInputActive && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        setModal((prev) => (prev === "shortcuts" ? "none" : "shortcuts"));
+      } else if (e.key === "Escape") {
+        setIsEditingTitle(false);
+        setModal("none");
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, []);
+
+  // ── Auto-reconnect health check polling when backend is unreachable ──────────
+  useEffect(() => {
+    if (backendStatus !== "unreachable") return;
+    const interval = setInterval(async () => {
+      try {
+        await checkBackendHealth();
+        setBackendStatus("healthy");
+        loadSessionsList();
+        showToast("Connected to DocMind backend server");
+      } catch {
+        // still unreachable, will retry
+      }
+    }, 10000);
+    return () => clearInterval(interval);
+  }, [backendStatus]);
+
+  const toggleSidebar = () => {
+    setIsSidebarOpen((prev) => {
+      const next = !prev;
+      saveSidebarState(next);
+      return next;
+    });
+  };
+
+  const verifyHealth = async () => {
+    try {
+      await checkBackendHealth();
+      setBackendStatus("healthy");
+      loadSessionsList();
+    } catch {
+      setBackendStatus("unreachable");
+    }
+  };
+
+  const loadSessionsList = async () => {
+    try {
+      const sessList = await listSessions();
+      setSessions(sessList);
+      setBackendStatus("healthy");
+    } catch (err) {
+      console.warn("Backend server not reachable during session loading:", err);
+      setBackendStatus("unreachable");
+    }
+  };
+
+  // ── Scroll to bottom ────────────────────────────────────────────────────────
+  useEffect(() => {
+    const el = chatScrollRef.current;
+    if (!el) return;
+    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    // Only auto-scroll if user is near the bottom (within 200px)
+    if (distFromBottom < 200) {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      setShowScrollToBottom(false);
+    } else {
+      setShowScrollToBottom(true);
+    }
+  }, [messages, streamingContent]);
+
+  // ── Scroll detection for scroll-to-bottom button ─────────────────────────────
+  const handleChatScroll = useCallback(() => {
+    const el = chatScrollRef.current;
+    if (!el) return;
+    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    setShowScrollToBottom(distFromBottom > 200);
+  }, []);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    setShowScrollToBottom(false);
+  };
+
+  // ── Auto-resize textarea ────────────────────────────────────────────────────
+  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setInputValue(e.target.value);
+    const el = e.target;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
+  };
+
+  // ── Select a session ────────────────────────────────────────────────────────
+  const handleSelectSession = useCallback(async (session: Session) => {
+    setActiveSession(session);
+    setIsLoadingMessages(true);
+    setMessages([]);
+    setError("");
+    if (typeof window !== "undefined" && window.innerWidth < 768) {
+      setIsSidebarOpen(false);
+      saveSidebarState(false);
+    }
+    try {
+      const fullSession = await getSession(session.id);
+      setActiveSession(fullSession);
+      const msgs = await getMessages(session.id);
+      setMessages(msgs);
+    } catch {
+      setError("Failed to load messages for this conversation");
+    } finally {
+      setIsLoadingMessages(false);
+    }
+  }, []);
+
+  // ── Start a new chat ────────────────────────────────────────────────────────
+  const handleNewChat = async () => {
+    try {
+      const newId = await createSession("New Conversation");
+      const updatedList = await listSessions();
+      setSessions(updatedList);
+      const created = updatedList.find((s) => s.id === newId) || {
+        id: newId,
+        title: "New Conversation",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        documents: [],
+        message_count: 0,
+      };
+      setActiveSession(created);
+      setMessages([]);
+      setInputValue("");
+      setError("");
+      if (typeof window !== "undefined" && window.innerWidth < 768) {
+        setIsSidebarOpen(false);
+        saveSidebarState(false);
+      }
+    } catch (err) {
+      console.warn("Failed to create new chat session:", err);
+      setError("Unable to connect to backend server. Please verify backend is running on port 8000.");
+    }
+  };
+
+  // ── Start with Prompt Spark ─────────────────────────────────────────────────
+  const handleStartWithPrompt = async (promptText: string) => {
+    let session = activeSession;
+    if (!session) {
+      try {
+        const newId = await createSession(promptText.slice(0, 35) + (promptText.length > 35 ? "…" : ""));
+        const updatedList = await listSessions();
+        setSessions(updatedList);
+        session = updatedList.find((s) => s.id === newId) || null;
+        if (session) setActiveSession(session);
+      } catch (err) {
+        console.warn("Failed to create session for spark prompt:", err);
+      }
+    }
+    setInputValue(promptText);
+    if (textareaRef.current) {
+      textareaRef.current.focus();
+    }
+  };
+
+  // ── Send Message ────────────────────────────────────────────────────────────
+  const handleSend = async () => {
+    const text = inputValue.trim();
+    if (!text || isStreaming) return;
+
+    if (!apiKeys.gemini && !apiKeys.groq && !apiKeys.openrouter) {
+      setModal("settings");
+      return;
+    }
+
+    let session = activeSession;
+    if (!session) {
+      try {
+        const newId = await createSession(text.slice(0, 35) + (text.length > 35 ? "…" : ""));
+        const updatedList = await listSessions();
+        setSessions(updatedList);
+        session = updatedList.find((s) => s.id === newId) || null;
+        if (session) setActiveSession(session);
+      } catch (err) {
+        setError("Failed to initialize conversation. Please check backend connection.");
+        return;
+      }
+    }
+
+    if (!session) return;
+
+    setInputValue("");
+    if (textareaRef.current) {
+      textareaRef.current.style.height = "auto";
+    }
+
+    const userMsg: Message = {
+      id: `temp-${Date.now()}`,
+      session_id: session.id,
+      role: "user",
+      content: text,
+      created_at: new Date().toISOString(),
+    };
+    setMessages((prev) => [...prev, userMsg]);
+
+    setIsStreaming(true);
+    setStreamingContent("");
+    setStreamingMemories([]);
+    setError("");
+
+    let fullContent = "";
+    let capturedSources: Source[] = [];
+    let capturedMemories: MemoryItem[] = [];
+
+    try {
+      await sendMessage(session.id, text, apiKeys, {
+        onToken: (token) => {
+          fullContent += token;
+          setStreamingContent(fullContent);
+        },
+        onSources: (srcs) => {
+          capturedSources = srcs;
+        },
+        onMemoryRecalled: (mems) => {
+          capturedMemories = mems;
+          setStreamingMemories(mems);
+        },
+        onDone: () => {
+          setIsStreaming(false);
+          setStreamingContent("");
+          setStreamingMemories([]);
+          const assistantMsg: Message = {
+            id: `assistant-${Date.now()}`,
+            session_id: session!.id,
+            role: "assistant",
+            content: fullContent,
+            created_at: new Date().toISOString(),
+            sources: capturedSources,
+            memory_recalled: capturedMemories,
+          };
+          setMessages((prev) => [...prev, assistantMsg]);
+          listSessions().then(setSessions).catch((err) => console.warn("Failed to refresh sessions list:", err));
+        },
+        onError: (errMsg) => {
+          setIsStreaming(false);
+          setStreamingContent("");
+          setStreamingMemories([]);
+          setError(errMsg);
+        },
+      });
+    } catch (err) {
+      console.warn("Chat transmission error:", err);
+      setIsStreaming(false);
+      setStreamingContent("");
+      setStreamingMemories([]);
+      setError("An unexpected error occurred during chat transmission.");
+    } finally {
+      setTimeout(() => setIsStreaming(false), 200);
+    }
+  };
+
+  // ── Summarize Session Documents ─────────────────────────────────────────────
+  const handleSummarize = async () => {
+    if (!activeSession || isStreaming) return;
+    if (!activeSession.documents || activeSession.documents.length === 0) {
+      setError("Please attach at least one document to this chat before summarizing.");
+      return;
+    }
+
+    if (!apiKeys.gemini && !apiKeys.groq && !apiKeys.openrouter) {
+      setModal("settings");
+      return;
+    }
+
+    setIsStreaming(true);
+    setStreamingContent("");
+    setStreamingMemories([]);
+    setError("");
+
+    let fullContent = "";
+
+    try {
+      await summarizeSession(activeSession.id, apiKeys, {
+        onToken: (token) => {
+          fullContent += token;
+          setStreamingContent(fullContent);
+        },
+        onDone: () => {
+          setIsStreaming(false);
+          setStreamingContent("");
+          const summaryMsg: Message = {
+            id: `summary-${Date.now()}`,
+            session_id: activeSession.id,
+            role: "assistant",
+            content: fullContent,
+            created_at: new Date().toISOString(),
+          };
+          setMessages((prev) => [...prev, summaryMsg]);
+          listSessions().then(setSessions).catch((err) => console.warn("Failed to refresh sessions list:", err));
+        },
+        onError: (errMsg) => {
+          setIsStreaming(false);
+          setStreamingContent("");
+          setError(errMsg);
+        },
+      });
+    } catch (err) {
+      console.warn("Summarization error:", err);
+      setIsStreaming(false);
+      setStreamingContent("");
+      setError("An unexpected error occurred while generating summary.");
+    } finally {
+      setTimeout(() => setIsStreaming(false), 200);
+    }
+  };
+
+  // ── Export Chat as Markdown ─────────────────────────────────────────────────
+  const handleExportChat = () => {
+    if (!activeSession || messages.length === 0) return;
+    const lines: string[] = [];
+    lines.push(`# ${activeSession.title}`);
+    lines.push(`*Exported from DocMind AI — ${new Date().toLocaleString()}*`);
+    lines.push("");
+    if (currentDocs.length > 0) {
+      lines.push(`## Attached Documents`);
+      currentDocs.forEach((d) => lines.push(`- ${d.filename} (${d.chunk_count} chunks)`));
+      lines.push("");
+    }
+    lines.push(`## Conversation`);
+    lines.push("");
+    messages.forEach((msg) => {
+      const role = msg.role === "user" ? "**You**" : "**DocMind AI**";
+      const time = (() => {
+        try { return new Date(msg.created_at).toLocaleTimeString(); } catch { return ""; }
+      })();
+      lines.push(`### ${role} — ${time}`);
+      lines.push("");
+      lines.push(msg.content);
+      lines.push("");
+    });
+    const blob = new Blob([lines.join("\n")], { type: "text/markdown; charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `docmind-${activeSession.title.replace(/[^a-z0-9]/gi, "_").toLowerCase()}-${Date.now()}.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast("Chat exported as Markdown");
+  };
+
+  // ── Session Title Editing ───────────────────────────────────────────────────
+  const handleStartTitleEdit = () => {
+    if (!activeSession) return;
+    setEditingTitleValue(activeSession.title);
+    setIsEditingTitle(true);
+    setTimeout(() => titleInputRef.current?.select(), 50);
+  };
+
+  const handleSaveTitle = async () => {
+    const newTitle = editingTitleValue.trim();
+    if (newTitle && activeSession && newTitle !== activeSession.title) {
+      const updated = { ...activeSession, title: newTitle };
+      setActiveSession(updated);
+      setSessions((prev) =>
+        prev.map((s) => (s.id === activeSession.id ? { ...s, title: newTitle } : s))
+      );
+      try {
+        await renameSession(activeSession.id, newTitle);
+      } catch (err) {
+        console.warn("Failed to persist session rename to backend:", err);
+      }
+    }
+    setIsEditingTitle(false);
+  };
+
+  const handleTitleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") handleSaveTitle();
+    if (e.key === "Escape") setIsEditingTitle(false);
+  };
+
+  // ── All Sessions Deleted ───────────────────────────────────────────────────
+  const handleAllSessionsDeleted = () => {
+    setSessions([]);
+    setActiveSession(null);
+    setMessages([]);
+    setInputValue("");
+    setError("");
+    showToast("All conversations deleted successfully");
+  };
+
+  // ── Regenerate Last Message ────────────────────────────────────────────────
+  const handleRegenerate = async () => {
+    if (isStreaming || messages.length === 0 || !activeSession) return;
+    // Find last user message
+    const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
+    if (!lastUserMsg) return;
+
+    // Remove the trailing assistant message if present
+    const trimmed = messages[messages.length - 1].role === "assistant"
+      ? messages.slice(0, -1)
+      : messages;
+    setMessages(trimmed);
+
+    setIsStreaming(true);
+    setStreamingContent("");
+    setStreamingMemories([]);
+    setError("");
+
+    let fullContent = "";
+    let capturedSources: Source[] = [];
+    let capturedMemories: MemoryItem[] = [];
+
+    try {
+      await sendMessage(activeSession.id, lastUserMsg.content, apiKeys, {
+        onToken: (token) => {
+          fullContent += token;
+          setStreamingContent(fullContent);
+        },
+        onSources: (srcs) => {
+          capturedSources = srcs;
+        },
+        onMemoryRecalled: (mems) => {
+          capturedMemories = mems;
+          setStreamingMemories(mems);
+        },
+        onDone: () => {
+          setIsStreaming(false);
+          setStreamingContent("");
+          setStreamingMemories([]);
+          const assistantMsg: Message = {
+            id: `assistant-${Date.now()}`,
+            session_id: activeSession.id,
+            role: "assistant",
+            content: fullContent,
+            created_at: new Date().toISOString(),
+            sources: capturedSources,
+            memory_recalled: capturedMemories,
+          };
+          setMessages((prev) => [...prev, assistantMsg]);
+        },
+        onError: (errMsg) => {
+          setIsStreaming(false);
+          setStreamingContent("");
+          setStreamingMemories([]);
+          setError(errMsg);
+        },
+      });
+    } catch (err) {
+      setIsStreaming(false);
+      setError("Failed to regenerate response.");
+    }
+  };
+
+  // ── Document Added ──────────────────────────────────────────────────────────
+  const handleDocumentAttached = (doc: Document) => {
+    if (activeSession) {
+      const updatedDocs = [...(activeSession.documents || []), doc];
+      const updatedSession = { ...activeSession, documents: updatedDocs };
+      setActiveSession(updatedSession);
+      setSessions((prev) =>
+        prev.map((s) => (s.id === activeSession.id ? updatedSession : s))
+      );
+    }
+    showToast(`Attached ${doc.filename} successfully`);
+  };
+
+  // ── Background Polling ──────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!activeSession) return;
+    const hasProcessing = activeSession.documents?.some(
+      (d) => d.status === "processing" || d.chunk_count === 0
+    );
+    if (!hasProcessing) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const docs = await listSessionDocuments(activeSession.id);
+        const stillProcessing = docs.some((d) => d.status === "processing" || d.chunk_count === 0);
+        setActiveSession((prev) => {
+          if (!prev || prev.id !== activeSession.id) return prev;
+          return { ...prev, documents: docs };
+        });
+        setSessions((prev) =>
+          prev.map((s) => (s.id === activeSession.id ? { ...s, documents: docs } : s))
+        );
+        if (!stillProcessing) {
+          clearInterval(interval);
+        }
+      } catch (err) {
+        console.warn("Background document polling notice:", err);
+      }
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, [activeSession?.id, activeSession?.documents]);
+
+  // ── Delete Document ─────────────────────────────────────────────────────────
+  const handleDeleteDoc = async (docId: string) => {
+    if (!activeSession) return;
+    setDeletingDocId(docId);
+    try {
+      await deleteDocument(docId);
+      const remainingDocs = (activeSession.documents || []).filter((d) => d.doc_id !== docId);
+      const updatedSession = { ...activeSession, documents: remainingDocs };
+      setActiveSession(updatedSession);
+      setSessions((prev) =>
+        prev.map((s) => (s.id === activeSession.id ? updatedSession : s))
+      );
+      showToast("Document removed from conversation");
+    } catch (err) {
+      setError("Failed to delete document");
+    } finally {
+      setDeletingDocId(null);
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  };
+
+  const handleSaveKeys = (keys: ApiKeys) => {
+    setApiKeys(keys);
+    saveKeys(keys);
+    showToast("Multi-LLM API Keys updated");
+  };
+
+  // ── Drag & Drop Anywhere on Workspace ──────────────────────────────────────
+  const handleWorkspaceDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    if (e.dataTransfer.types.includes("Files")) {
+      setIsDraggingFile(true);
+    }
+  };
+
+  const handleWorkspaceDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+    setIsDraggingFile(false);
+  };
+
+  const handleWorkspaceDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDraggingFile(false);
+    const file = e.dataTransfer.files?.[0];
+    if (!file) return;
+
+    let targetSessionId = activeSession?.id;
+    if (!targetSessionId) {
+      try {
+        const newId = await createSession(file.name.replace(/\.[^/.]+$/, ""));
+        const updatedList = await listSessions();
+        setSessions(updatedList);
+        const s = updatedList.find((item) => item.id === newId);
+        if (s) setActiveSession(s);
+        targetSessionId = newId;
+      } catch {
+        setError("Failed to create conversation for uploaded document");
+        return;
+      }
+    }
+
+    try {
+      showToast(`Uploading ${file.name}…`);
+      const doc = await uploadDocumentToSession(targetSessionId, file, apiKeys);
+      handleDocumentAttached(doc);
+    } catch (err) {
+      setError((err as Error).message || "Document upload failed");
+    }
+  };
+
+  const hasSession = !!activeSession;
+  const currentDocs = activeSession?.documents || [];
+  const configuredKeyCount = Object.values(apiKeys).filter(Boolean).length;
+
+  return (
+    <>
+      {/* Monochromatic 3D Background */}
+      <InteractiveBackground isStreaming={isStreaming} />
+
+      <div className={`app-shell ${isSidebarOpen ? "sidebar-expanded" : "sidebar-collapsed"}`}>
+        {/* Mobile Backdrop Overlay */}
+        {isSidebarOpen && (
+          <div
+            className="sidebar-backdrop"
+            onClick={() => {
+              setIsSidebarOpen(false);
+              saveSidebarState(false);
+            }}
+          />
+        )}
+
+        {/* Sidebar */}
+        <Sidebar
+          isOpen={isSidebarOpen}
+          sessions={sessions}
+          activeSessionId={activeSession?.id || null}
+          apiKeys={apiKeys}
+          backendStatus={backendStatus}
+          onNewChat={handleNewChat}
+          onSelectSession={handleSelectSession}
+          onSessionDeleted={(id) => {
+            setSessions((prev) => prev.filter((s) => s.id !== id));
+            if (activeSession?.id === id) {
+              setActiveSession(null);
+              setMessages([]);
+            }
+          }}
+          onAllSessionsDeleted={handleAllSessionsDeleted}
+          onOpenSettings={() => setModal("settings")}
+          onOpenShortcuts={() => setModal("shortcuts")}
+          onCloseSidebar={() => {
+            setIsSidebarOpen(false);
+            saveSidebarState(false);
+          }}
+        />
+
+        {/* Main Workspace */}
+        <main
+          className="main-content"
+          onDragOver={handleWorkspaceDragOver}
+          onDragLeave={handleWorkspaceDragLeave}
+          onDrop={handleWorkspaceDrop}
+        >
+          {/* Workspace Drag Overlay */}
+          <AnimatePresence>
+            {isDraggingFile && (
+              <motion.div
+                className="workspace-drag-overlay"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.15 }}
+              >
+                <div className="workspace-drag-content">
+                  <Upload size={38} color="#FFFFFF" />
+                  <div className="workspace-drag-title">Drop document here to attach</div>
+                  <div className="workspace-drag-subtitle">PDF, DOCX, TXT, MD, CSV, XLSX supported</div>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+          {/* Responsive Topbar Header */}
+          <header className="topbar">
+            <div className="topbar-left">
+              <motion.button
+                className="topbar-icon-btn"
+                onClick={toggleSidebar}
+                whileHover={{ scale: 1.08 }}
+                whileTap={{ scale: 0.92 }}
+                transition={{ type: "spring", stiffness: 400, damping: 20 }}
+                title={isSidebarOpen ? "Collapse sidebar (Ctrl+B)" : "Expand sidebar (Ctrl+B)"}
+                aria-label="Toggle sidebar"
+              >
+                <PanelLeft size={16} />
+              </motion.button>
+
+              <div className="topbar-title-group">
+                {isEditingTitle && hasSession ? (
+                  <input
+                    ref={titleInputRef}
+                    type="text"
+                    value={editingTitleValue}
+                    onChange={(e) => setEditingTitleValue(e.target.value)}
+                    onBlur={handleSaveTitle}
+                    onKeyDown={handleTitleKeyDown}
+                    className="topbar-title-input"
+                    maxLength={80}
+                    aria-label="Edit conversation title"
+                  />
+                ) : (
+                  <motion.div
+                    className="topbar-title"
+                    onClick={hasSession ? handleStartTitleEdit : undefined}
+                    title={hasSession ? "Double-click to rename" : undefined}
+                    style={{ cursor: hasSession ? "text" : "default" }}
+                    whileHover={hasSession ? { opacity: 0.8 } : {}}
+                  >
+                    {hasSession ? activeSession.title : "DocMind AI"}
+                  </motion.div>
+                )}
+                {hasSession && currentDocs.length > 0 && !isEditingTitle && (
+                  <span className="topbar-doc-pill">
+                    <FileText size={10.5} />
+                    <span>{currentDocs.length} {currentDocs.length === 1 ? "doc" : "docs"}</span>
+                  </span>
+                )}
+              </div>
+            </div>
+
+            <div className="topbar-actions">
+              {hasSession && currentDocs.length > 0 && (
+                <motion.button
+                  className="topbar-action-btn summarize-btn"
+                  onClick={handleSummarize}
+                  disabled={isStreaming}
+                  whileHover={{ scale: 1.04 }}
+                  whileTap={{ scale: 0.95 }}
+                  title="Synthesize and summarize active conversation documents"
+                >
+                  <Sparkles size={13} color="#000000" />
+                  <span className="hide-on-mobile">Summarize</span>
+                </motion.button>
+              )}
+
+              {hasSession && messages.length > 0 && (
+                <motion.button
+                  className="topbar-action-btn hide-on-tablet"
+                  onClick={handleExportChat}
+                  whileHover={{ scale: 1.04 }}
+                  whileTap={{ scale: 0.95 }}
+                  title="Export conversation as Markdown"
+                >
+                  <Download size={13.5} />
+                  <span>Export</span>
+                </motion.button>
+              )}
+
+              <motion.button
+                className="topbar-action-btn"
+                onClick={() => setModal("pipeline")}
+                whileHover={{ scale: 1.04 }}
+                whileTap={{ scale: 0.95 }}
+                title="View AI Pipeline Architecture"
+              >
+                <Layers size={13.5} />
+                <span className="hide-on-tablet">Pipeline</span>
+              </motion.button>
+
+              <motion.button
+                className="topbar-action-btn"
+                onClick={() => setModal("memory")}
+                whileHover={{ scale: 1.04 }}
+                whileTap={{ scale: 0.95 }}
+                title="View Global Cross-Session Memory"
+              >
+                <Database size={13.5} />
+                <span className="hide-on-tablet">Memory</span>
+              </motion.button>
+
+              <motion.button
+                className="topbar-icon-btn"
+                onClick={() => setModal("settings")}
+                whileHover={{ scale: 1.08 }}
+                whileTap={{ scale: 0.92 }}
+                title="Configure Multi-LLM API Keys"
+                aria-label="Settings"
+              >
+                <Cpu size={15} />
+              </motion.button>
+
+              <motion.button
+                className="topbar-icon-btn mobile-new-chat-btn"
+                onClick={handleNewChat}
+                whileHover={{ scale: 1.08 }}
+                whileTap={{ scale: 0.92 }}
+                title="Start New Conversation"
+                aria-label="New chat"
+              >
+                <Plus size={16} />
+              </motion.button>
+            </div>
+          </header>
+
+          {hasSession ? (
+            <>
+              {/* Session Documents Context Header Strip */}
+              {currentDocs.length > 0 && (
+                <div className="context-strip">
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", flex: 1 }}>
+                    <span className="context-strip-label">
+                      Active Chat Context:
+                    </span>
+                    <AnimatePresence>
+                      {currentDocs.map((d) => (
+                        <motion.div
+                          key={d.doc_id}
+                          layout
+                          initial={{ scale: 0.8, opacity: 0 }}
+                          animate={{ scale: 1, opacity: 1 }}
+                          exit={{ scale: 0.8, opacity: 0 }}
+                          whileHover={{ scale: 1.03, y: -1 }}
+                          transition={{ type: "spring", stiffness: 400, damping: 25 }}
+                          className="doc-chip"
+                        >
+                          <FileText size={13} color="#FFFFFF" />
+                          <span style={{ maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600 }}>
+                            {d.filename}
+                          </span>
+                          {d.status === "processing" || d.chunk_count === 0 ? (
+                            <span style={{ fontSize: 10, color: "#FFFFFF", display: "inline-flex", alignItems: "center", gap: 4, background: "rgba(255, 255, 255, 0.1)", padding: "1px 6px", borderRadius: 4 }}>
+                              <div className="spin" style={{ width: 8, height: 8, border: "1.2px solid #FFFFFF", borderTopColor: "transparent", borderRadius: "50%" }} />
+                              Processing…
+                            </span>
+                          ) : (
+                            <span style={{ fontSize: 10, color: "var(--text-muted-alt)" }}>
+                              ({d.chunk_count} chunks)
+                            </span>
+                          )}
+                          <motion.button
+                            className="icon-btn"
+                            style={{ width: 18, height: 18, marginLeft: 2 }}
+                            onClick={() => handleDeleteDoc(d.doc_id)}
+                            disabled={deletingDocId === d.doc_id}
+                            title="Remove document from this chat"
+                            whileHover={{ scale: 1.25 }}
+                            whileTap={{ scale: 0.8 }}
+                          >
+                            {deletingDocId === d.doc_id ? (
+                              <div className="spin" style={{ width: 8, height: 8, border: "1px solid #FFFFFF", borderTopColor: "transparent", borderRadius: "50%" }} />
+                            ) : (
+                              <Trash2 size={11} color="#FFFFFF" />
+                            )}
+                          </motion.button>
+                        </motion.div>
+                      ))}
+                    </AnimatePresence>
+                  </div>
+
+                  <motion.button
+                    className="btn btn-outline"
+                    style={{ padding: "4px 10px", fontSize: 11 }}
+                    onClick={() => setModal("upload")}
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                  >
+                    <Plus size={11} color="#FFFFFF" /> Add Document
+                  </motion.button>
+                </div>
+              )}
+
+              {/* Chat Message Stream */}
+              <div
+                ref={chatScrollRef}
+                className="chat-scrollable"
+                onScroll={handleChatScroll}
+              >
+                {/* Scroll To Bottom Button */}
+                <AnimatePresence>
+                  {showScrollToBottom && (
+                    <motion.button
+                      initial={{ opacity: 0, scale: 0.85, y: 10 }}
+                      animate={{ opacity: 1, scale: 1, y: 0 }}
+                      exit={{ opacity: 0, scale: 0.85, y: 10 }}
+                      transition={{ type: "spring", stiffness: 400, damping: 25 }}
+                      onClick={scrollToBottom}
+                      className="scroll-to-bottom-btn"
+                      title="Scroll to bottom"
+                      aria-label="Scroll to latest message"
+                    >
+                      ↓
+                    </motion.button>
+                  )}
+                </AnimatePresence>
+                <div className="chat-container">
+                  {currentDocs.length === 0 && messages.length === 0 && (
+                    <motion.div
+                      initial={{ opacity: 0, scale: 0.95, y: 20 }}
+                      animate={{ opacity: 1, scale: 1, y: 0 }}
+                      transition={{ type: "spring", stiffness: 350, damping: 25 }}
+                      style={{
+                        padding: "36px 24px",
+                        textAlign: "center",
+                        border: "1px dashed rgba(255, 255, 255, 0.25)",
+                        borderRadius: "var(--radius-xl)",
+                        background: "#080808",
+                        maxWidth: 640,
+                        margin: "40px auto 0",
+                        backdropFilter: "blur(20px)",
+                        boxShadow: "var(--shadow-md)",
+                      }}
+                    >
+                      <motion.div
+                        style={{
+                          width: 52,
+                          height: 52,
+                          borderRadius: "var(--radius-lg)",
+                          background: "#141414",
+                          border: "1px solid rgba(255, 255, 255, 0.3)",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          margin: "0 auto 16px",
+                          color: "#FFFFFF",
+                        }}
+                        whileHover={{ rotate: 10, scale: 1.1 }}
+                      >
+                        <FileText size={26} color="#FFFFFF" />
+                      </motion.div>
+                      <div style={{ fontSize: 16, fontWeight: 700, color: "#FFFFFF", marginBottom: 6 }}>
+                        No Documents Attached to This Conversation
+                      </div>
+                      <p style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.6, marginBottom: 20 }}>
+                        Attach PDF, DOCX, TXT, CSV, or XLSX files to activate hierarchical hybrid retrieval, or chat freely with continuous cross-session memory.
+                      </p>
+                      <motion.button
+                        className="btn btn-primary"
+                        onClick={() => setModal("upload")}
+                        whileHover={{ scale: 1.04, y: -2 }}
+                        whileTap={{ scale: 0.95 }}
+                      >
+                        <Upload size={14} color="#000000" />
+                        <span>Attach Document to Chat</span>
+                      </motion.button>
+                    </motion.div>
+                  )}
+
+                  {isLoadingMessages && (
+                    <div style={{ textAlign: "center", color: "var(--text-muted-alt)", padding: 24, fontSize: 13 }}>
+                      Loading conversation history…
+                    </div>
+                  )}
+
+                  <AnimatePresence initial={false}>
+                    {messages.map((msg) => (
+                      <MessageBubble key={msg.id} message={msg} />
+                    ))}
+                  </AnimatePresence>
+
+                  {isStreaming && streamingContent && (
+                    <StreamingMessage
+                      content={streamingContent}
+                      memories={streamingMemories}
+                    />
+                  )}
+
+                  {isStreaming && !streamingContent && <TypingIndicator />}
+
+                  <AnimatePresence>
+                    {error && (
+                      <motion.div
+                        initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                        transition={{ type: "spring", stiffness: 400, damping: 25 }}
+                        style={{
+                          padding: "12px 16px",
+                          background: "#111111",
+                          border: "1px solid rgba(255, 255, 255, 0.4)",
+                          borderRadius: "var(--radius-md)",
+                          color: "#FFFFFF",
+                          fontSize: 13,
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 10,
+                        }}
+                      >
+                        <span>⚠️ {error}</span>
+                        <button
+                          onClick={() => setError("")}
+                          style={{ marginLeft: "auto", background: "none", border: "none", color: "#FFFFFF", cursor: "pointer", fontSize: 12 }}
+                        >
+                          Dismiss
+                        </button>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+
+                  <AnimatePresence>
+                    {messages.length > 0 && !isStreaming && messages[messages.length - 1].role === "assistant" && (
+                      <motion.div
+                        initial={{ opacity: 0, y: 6 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0 }}
+                        style={{ display: "flex", justifyContent: "flex-end", marginTop: -10, paddingRight: 4 }}
+                      >
+                        <motion.button
+                          className="regenerate-btn"
+                          onClick={handleRegenerate}
+                          whileHover={{ scale: 1.05 }}
+                          whileTap={{ scale: 0.95 }}
+                          title="Regenerate the latest AI response"
+                        >
+                          <RefreshCw size={11} />
+                          <span>Regenerate</span>
+                        </motion.button>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+
+                  <div ref={messagesEndRef} />
+                </div>
+              </div>
+
+              {/* Chat Input Floating Command Bar */}
+              <div className="input-area">
+                <div className="input-container">
+                  <div className="input-box-wrapper">
+                    <motion.button
+                      className="input-action-btn"
+                      onClick={() => setModal("upload")}
+                      title="Attach document to this conversation"
+                      disabled={isStreaming}
+                      whileHover={{ scale: 1.15 }}
+                      whileTap={{ scale: 0.88 }}
+                      transition={{ type: "spring", stiffness: 450, damping: 20 }}
+                    >
+                      <Paperclip size={16} color="#FFFFFF" />
+                    </motion.button>
+
+                    <textarea
+                      ref={textareaRef}
+                      className="chat-textarea"
+                      placeholder={
+                        currentDocs.length > 0
+                          ? "Ask about attached documents or past conversation insights…"
+                          : "Type a prompt or attach documents to this conversation…"
+                      }
+                      value={inputValue}
+                      onChange={handleInputChange}
+                      onKeyDown={handleKeyDown}
+                      rows={1}
+                      disabled={isStreaming}
+                    />
+
+                    <motion.button
+                      className="input-action-btn send-btn"
+                      onClick={handleSend}
+                      disabled={!inputValue.trim() || isStreaming}
+                      title="Send message (Enter)"
+                      whileHover={{ scale: !inputValue.trim() || isStreaming ? 1 : 1.1 }}
+                      whileTap={{ scale: !inputValue.trim() || isStreaming ? 1 : 0.88 }}
+                      transition={{ type: "spring", stiffness: 450, damping: 20 }}
+                    >
+                      {isStreaming ? (
+                        <div
+                          className="spin"
+                          style={{
+                            width: 13,
+                            height: 13,
+                            border: "1.5px solid #000000",
+                            borderTopColor: "transparent",
+                            borderRadius: "50%",
+                          }}
+                        />
+                      ) : (
+                        <ArrowUp size={16} strokeWidth={2.5} color="#000000" />
+                      )}
+                    </motion.button>
+                  </div>
+
+                  <div className="input-footer-hints">
+                    <span className="hide-on-mobile">Press <strong>Enter</strong> to send &bull; <strong>Shift+Enter</strong> for newline</span>
+                    <span className="hide-on-mobile"><strong>Ctrl+B</strong> to toggle sidebar</span>
+                    {inputValue.length > 0 && (
+                      <span
+                        className={`char-counter ${
+                          inputValue.length > 3000 ? "limit" :
+                          inputValue.length > 2000 ? "warn" : ""
+                        }`}
+                      >
+                        {inputValue.length.toLocaleString()} chars
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className="chat-scrollable">
+              <EmptyState
+                onStartNewChat={handleNewChat}
+                onOpenSettings={() => setModal("settings")}
+                onSelectPrompt={handleStartWithPrompt}
+              />
+            </div>
+          )}
+        </main>
+      </div>
+
+      {/* Modals with AnimatePresence */}
+      <AnimatePresence>
+        {modal === "settings" && (
+          <ApiKeyModal
+            apiKeys={apiKeys}
+            onSave={handleSaveKeys}
+            onClose={() => setModal("none")}
+          />
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {modal === "upload" && activeSession && (
+          <DocumentUploadModal
+            sessionId={activeSession.id}
+            apiKeys={apiKeys}
+            onClose={() => setModal("none")}
+            onUploaded={handleDocumentAttached}
+          />
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {modal === "memory" && (
+          <GlobalMemoryModal
+            sessions={sessions}
+            onClose={() => setModal("none")}
+          />
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {modal === "pipeline" && (
+          <PipelineModal
+            onClose={() => setModal("none")}
+          />
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {modal === "shortcuts" && (
+          <KeyboardShortcutsModal
+            onClose={() => setModal("none")}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Global Toast Notification */}
+      <AnimatePresence>
+        {toastMessage && (
+          <motion.div
+            initial={{ opacity: 0, y: -20, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -20, scale: 0.95 }}
+            transition={{ type: "spring", stiffness: 450, damping: 28 }}
+            style={{
+              position: "fixed",
+              top: 24,
+              right: 24,
+              zIndex: 9999,
+              background: "#0E0E0E",
+              border: "1px solid rgba(255, 255, 255, 0.4)",
+              borderRadius: "var(--radius-md)",
+              padding: "10px 18px",
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              boxShadow: "0 10px 30px rgba(0, 0, 0, 0.95), 0 0 15px rgba(255, 255, 255, 0.15)",
+              backdropFilter: "blur(20px)",
+              color: "#FFFFFF",
+              fontSize: 13,
+              fontWeight: 600,
+            }}
+          >
+            <CheckCircle2 size={16} color="#FFFFFF" />
+            <span>{toastMessage}</span>
+            <button
+              onClick={() => setToastMessage(null)}
+              style={{
+                background: "none",
+                border: "none",
+                color: "var(--text-muted-alt)",
+                cursor: "pointer",
+                marginLeft: 8,
+                padding: 2,
+                fontSize: 13,
+              }}
+            >
+              ✕
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </>
+  );
+}

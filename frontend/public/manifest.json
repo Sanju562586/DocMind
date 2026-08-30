@@ -1,0 +1,19 @@
+{
+  "name": "DocMind AI — Neural Document Intelligence",
+  "short_name": "DocMind AI",
+  "description": "High-precision document Q&A with hybrid RAG, cross-encoder reranking, and global cross-session memory.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/favicon.ico",
+      "sizes": "any",
+      "type": "image/x-icon"
+    }
+  ],
+  "categories": ["productivity", "utilities"],
+  "lang": "en"
+}
