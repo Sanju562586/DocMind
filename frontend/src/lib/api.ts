@@ -1,8 +1,10 @@
-// API client — all calls go through Next.js proxy to FastAPI backend
+// API client — all calls go through Next.js proxy or direct backend URL
 
 import { ApiKeys, Document, Message, Session, Source, MemoryItem, SystemStats } from "./types";
 
-const API_BASE = "/api/backend";
+const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL
+  ? `${process.env.NEXT_PUBLIC_BACKEND_URL.replace(/\/+$/, "")}/api`
+  : "/api/backend";
 
 function buildHeaders(keys: Partial<ApiKeys>): HeadersInit {
   const headers: Record<string, string> = {
@@ -24,7 +26,7 @@ export function parseErrorMessage(err: unknown, fallback: string): string {
       err.includes("ECONNREFUSED") ||
       err.includes("fetch failed")
     ) {
-      return "Backend server is offline or unreachable on http://127.0.0.1:8000. Please start the FastAPI backend server.";
+      return "Backend server is offline or unreachable. Please verify the FastAPI backend server is running.";
     }
     return err;
   }
@@ -35,7 +37,7 @@ export function parseErrorMessage(err: unknown, fallback: string): string {
       err.message.includes("ECONNREFUSED") ||
       err.message.includes("fetch failed")
     ) {
-      return "Backend server is offline or unreachable on http://127.0.0.1:8000. Please start the FastAPI backend server.";
+      return "Backend server is offline or unreachable. Please verify the FastAPI backend server is running.";
     }
     return err.message;
   }
@@ -48,7 +50,7 @@ export function parseErrorMessage(err: unknown, fallback: string): string {
         detail === "Service Unavailable" ||
         detail.includes("ECONNREFUSED")
       ) {
-        return "Backend server is offline or unreachable on http://127.0.0.1:8000. Please start the FastAPI backend server.";
+        return "Backend server is offline or unreachable. Please verify the FastAPI backend server is running.";
       }
       return detail;
     }
@@ -58,6 +60,26 @@ export function parseErrorMessage(err: unknown, fallback: string): string {
     return JSON.stringify(detail);
   }
   return fallback;
+}
+
+/**
+ * Fetch with automatic exponential backoff retry for transient network and 503 errors.
+ */
+async function fetchWithRetry(url: string, options?: RequestInit, retries = 2, delayMs = 500): Promise<Response> {
+  try {
+    const res = await fetch(url, options);
+    if ((res.status === 503 || res.status === 502) && retries > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      return fetchWithRetry(url, options, retries - 1, delayMs * 2);
+    }
+    return res;
+  } catch (err) {
+    if (retries > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      return fetchWithRetry(url, options, retries - 1, delayMs * 2);
+    }
+    throw err;
+  }
 }
 
 async function handleResponse<T>(res: Response, fallbackError: string): Promise<T> {
@@ -77,7 +99,7 @@ async function handleResponse<T>(res: Response, fallbackError: string): Promise<
         typeof errBody === "string")
     ) {
       throw new Error(
-        "Backend server is offline or unreachable on http://127.0.0.1:8000. Please start the FastAPI backend server (python backend/main.py)."
+        "Backend server is offline or unreachable. Please verify the FastAPI backend is active."
       );
     }
 

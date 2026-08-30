@@ -1,25 +1,25 @@
-FROM python:3.11-slim
+﻿FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies needed for PyMuPDF / OpenCV / PDF parsing
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install CPU-optimized PyTorch & Python packages
 COPY requirements.txt .
-RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application files
 COPY . .
 
-# Ensure data directories exist
-RUN mkdir -p data/uploads data/indexes
+RUN mkdir -p /app/data/uploads /app/data/indexes
 
-# Expose server port
 EXPOSE 8000
 
-# Start Uvicorn FastAPI server
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8000/api/health/live || exit 1
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

@@ -1,0 +1,35 @@
+﻿services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: docmind-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - GEMINI_API_KEY=\
+      - GROQ_API_KEY=\
+      - OPENROUTER_API_KEY=\
+      - ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+      - DATABASE_PATH=/app/data/summarizer.db
+      - UPLOAD_DIR=/app/data/uploads
+      - INDEX_DIR=/app/data/indexes
+    volumes:
+      - docmind-data:/app/data
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: docmind-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - BACKEND_INTERNAL_URL=http://backend:8000
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  docmind-data:
