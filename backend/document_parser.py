@@ -50,23 +50,28 @@ class DocumentParser:
         import fitz  # pymupdf
 
         doc = fitz.open(path)
-        pages_text = []
-        for page in doc:
-            text = page.get_text("text")
-            pages_text.append(text)
+        try:
+            pages_text = []
+            for page in doc:
+                text = page.get_text("text")
+                if text:
+                    pages_text.append(text)
 
-        full_text = "\n\n".join(pages_text)
-        full_text = self._clean_text(full_text)
+            full_text = "\n\n".join(pages_text)
+            full_text = self._clean_text(full_text)
+            if not full_text:
+                full_text = f"(Document '{filename}' appears to contain scanned images or no extractable text.)"
 
-        metadata = {
-            "title": doc.metadata.get("title") or filename,
-            "source": filename,
-            "file_type": "pdf",
-            "page_count": len(doc),
-            "word_count": len(full_text.split()),
-        }
-        doc.close()
-        return full_text, metadata
+            metadata = {
+                "title": doc.metadata.get("title") or filename,
+                "source": filename,
+                "file_type": "pdf",
+                "page_count": len(doc),
+                "word_count": len(full_text.split()),
+            }
+            return full_text, metadata
+        finally:
+            doc.close()
 
     def _parse_docx(self, path: str, filename: str) -> Tuple[str, Dict]:
         from docx import Document
@@ -93,6 +98,8 @@ class DocumentParser:
 
         full_text = "\n\n".join(sections)
         full_text = self._clean_text(full_text)
+        if not full_text:
+            full_text = f"(Document '{filename}' contains no extractable paragraph text.)"
 
         metadata = {
             "title": filename,
@@ -104,9 +111,18 @@ class DocumentParser:
         return full_text, metadata
 
     def _parse_text(self, path: str, filename: str) -> Tuple[str, Dict]:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            text = f.read()
+        # Try UTF-8, fallback to Latin-1
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except Exception:
+            with open(path, "r", encoding="latin-1", errors="replace") as f:
+                text = f.read()
+
         text = self._clean_text(text)
+        if not text:
+            text = f"(File '{filename}' is empty.)"
+
         metadata = {
             "title": filename,
             "source": filename,
@@ -119,8 +135,12 @@ class DocumentParser:
     def _parse_html(self, path: str, filename: str) -> Tuple[str, Dict]:
         from bs4 import BeautifulSoup
 
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            html = f.read()
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                html = f.read()
+        except Exception:
+            with open(path, "r", encoding="latin-1", errors="replace") as f:
+                html = f.read()
 
         soup = BeautifulSoup(html, "lxml")
 
@@ -146,6 +166,8 @@ class DocumentParser:
 
         full_text = "\n\n".join(parts)
         full_text = self._clean_text(full_text)
+        if not full_text:
+            full_text = f"(Web page '{filename}' contains no readable textual content.)"
 
         metadata = {
             "title": title,
@@ -159,17 +181,28 @@ class DocumentParser:
     def _parse_csv(self, path: str, filename: str) -> Tuple[str, Dict]:
         import pandas as pd
 
-        df = pd.read_csv(path)
-        # Convert dataframe to a readable text format
-        rows = [" | ".join(str(v) for v in df.columns)]
+        # Read CSV with encoding fallback and reasonable limits
+        try:
+            df = pd.read_csv(path, nrows=5000)
+        except UnicodeDecodeError:
+            df = pd.read_csv(path, encoding="latin-1", nrows=5000)
+
+        # Convert dataframe to a readable text format (max 500 display rows)
+        display_df = df.head(500)
+        rows = [" | ".join(str(v) for v in display_df.columns)]
         rows.append("-" * len(rows[0]))
-        for _, row in df.iterrows():
+        for _, row in display_df.iterrows():
             rows.append(" | ".join(str(v) for v in row.values))
 
-        full_text = "\n".join(rows)
-        # Also include a statistical summary
-        summary = df.describe(include="all").to_string()
-        full_text = f"# CSV Data: {filename}\n\n## Data\n{full_text}\n\n## Summary\n{summary}"
+        data_text = "\n".join(rows)
+        # Statistical summary
+        try:
+            summary = df.describe(include="all").to_string()
+        except Exception:
+            summary = "Summary unavailable."
+
+        full_text = f"# CSV Data: {filename}\n\n## Data (Preview)\n{data_text}\n\n## Summary\n{summary}"
+        full_text = self._clean_text(full_text)
 
         metadata = {
             "title": filename,
@@ -186,25 +219,29 @@ class DocumentParser:
         import pandas as pd
 
         xls = pd.ExcelFile(path)
-        parts = []
-        for sheet_name in xls.sheet_names:
-            df = pd.read_excel(xls, sheet_name=sheet_name)
-            rows = [" | ".join(str(v) for v in df.columns)]
-            rows.append("-" * len(rows[0]))
-            for _, row in df.iterrows():
-                rows.append(" | ".join(str(v) for v in row.values))
-            parts.append(f"## Sheet: {sheet_name}\n\n" + "\n".join(rows))
+        try:
+            parts = []
+            for sheet_name in xls.sheet_names[:10]:  # Limit to 10 sheets
+                df = pd.read_excel(xls, sheet_name=sheet_name, nrows=500)
+                rows = [" | ".join(str(v) for v in df.columns)]
+                rows.append("-" * len(rows[0]))
+                for _, row in df.iterrows():
+                    rows.append(" | ".join(str(v) for v in row.values))
+                parts.append(f"## Sheet: {sheet_name}\n\n" + "\n".join(rows))
 
-        full_text = f"# Excel File: {filename}\n\n" + "\n\n".join(parts)
+            full_text = f"# Excel File: {filename}\n\n" + "\n\n".join(parts)
+            full_text = self._clean_text(full_text)
 
-        metadata = {
-            "title": filename,
-            "source": filename,
-            "file_type": "xlsx",
-            "page_count": len(xls.sheet_names),
-            "word_count": len(full_text.split()),
-        }
-        return full_text, metadata
+            metadata = {
+                "title": filename,
+                "source": filename,
+                "file_type": "xlsx",
+                "page_count": len(xls.sheet_names),
+                "word_count": len(full_text.split()),
+            }
+            return full_text, metadata
+        finally:
+            xls.close()
 
     # ──────────────────────────────────────────────
     # Helpers

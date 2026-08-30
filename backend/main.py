@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 import uuid
 from contextlib import asynccontextmanager
@@ -16,9 +17,12 @@ if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
 import aiofiles
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile, Query, BackgroundTasks
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, Query, BackgroundTasks, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from chunker import HierarchicalSemanticChunker
 from config import get_settings
@@ -28,8 +32,8 @@ from models import ChatRequest, SessionCreate, SessionTitleUpdate
 from retrieval import HybridRetriever
 from session_store import SessionStore
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(name)s  %(message)s")
-logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logger = logging.getLogger("docmind")
 
 settings = get_settings()
 
@@ -47,7 +51,7 @@ async def lifespan(app: FastAPI):
     os.makedirs(settings.upload_dir, exist_ok=True)
     os.makedirs(settings.index_dir, exist_ok=True)
 
-    logger.info("Initialising DocMind backend components …")
+    logger.info("Initializing DocMind production backend components...")
     store = SessionStore(db_path=settings.database_path)
     store.initialize()
 
@@ -61,18 +65,26 @@ async def lifespan(app: FastAPI):
         index_dir=settings.index_dir,
         top_k=settings.retrieval_top_k,
         candidates_k=settings.retrieval_candidates,
+        max_cached_sessions=settings.max_cached_sessions,
     )
     retriever.register_on_model_ready(chunker.set_embed_model)
     router_llm = LLMRouter()
     logger.info("All DocMind backend components ready ✓")
-    yield
+    try:
+        yield
+    finally:
+        logger.info("DocMind backend shutting down gracefully...")
 
 
+limiter = Limiter(key_func=get_remote_address, default_limits=["120/minute"])
 app = FastAPI(title="DocMind Document Intelligence API", version="2.0.0", lifespan=lifespan)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+cors_origins = settings.cors_origins if settings.cors_origins else ["http://localhost:3000", "http://127.0.0.1:3000"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -92,7 +104,7 @@ def _sse(data: dict) -> str:
 
 
 # ──────────────────────────────────────────────
-# Health & Status Endpoint
+# Health & Status Endpoints
 # ──────────────────────────────────────────────
 
 @app.get("/api/health")
@@ -104,6 +116,20 @@ async def health_check():
         "neural_models_ready": retriever.is_neural_ready if retriever else False,
         "providers_available": ["gemini", "groq", "openrouter"],
     }
+
+
+@app.get("/api/health/live")
+async def liveness():
+    """Liveness probe: returns 200 if the server process is alive."""
+    return {"status": "alive"}
+
+
+@app.get("/api/health/ready")
+async def readiness():
+    """Readiness probe: returns 200 if backend database and components are initialized."""
+    if store is None or retriever is None:
+        return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={"status": "initializing"})
+    return {"status": "ready", "neural_ready": retriever.is_neural_ready}
 
 
 # ──────────────────────────────────────────────
@@ -231,18 +257,31 @@ async def upload_document_to_session(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    ext = os.path.splitext(file.filename or "")[1].lower()
+    raw_filename = os.path.basename(file.filename or "document.txt")
+    ext = os.path.splitext(raw_filename)[1].lower()
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported file type '{ext}'. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
         )
 
-    doc_id = str(uuid.uuid4())
-    safe_name = f"{session_id}_{doc_id}_{file.filename}"
-    file_path = os.path.join(settings.upload_dir, safe_name)
+    # Sanitize filename against path traversal
+    clean_filename = re.sub(r"[^\w.\-]", "_", raw_filename)
+    if not clean_filename or clean_filename.startswith("."):
+        clean_filename = f"upload_{clean_filename}"
 
     content = await file.read()
+    if len(content) > settings.max_file_size_bytes:
+        max_mb = settings.max_file_size_bytes / (1024 * 1024)
+        raise HTTPException(
+            status_code=413,
+            detail=f"File size exceeds maximum allowed limit of {max_mb:.0f} MB.",
+        )
+
+    doc_id = str(uuid.uuid4())
+    safe_name = f"{session_id}_{doc_id}_{clean_filename}"
+    file_path = os.path.join(settings.upload_dir, safe_name)
+
     async with aiofiles.open(file_path, "wb") as f:
         await f.write(content)
 
@@ -251,7 +290,7 @@ async def upload_document_to_session(
     store.save_document(
         doc_id=doc_id,
         session_id=session_id,
-        filename=file.filename,
+        filename=clean_filename,
         chunk_count=0,
         char_count=0,
         word_count=0,
@@ -262,18 +301,25 @@ async def upload_document_to_session(
 
     # Automatically update session title if default
     if session["title"] in ("New Conversation", "New Chat") or len(session.get("documents", [])) == 0:
-        clean_title = file.filename.rsplit(".", 1)[0].replace("_", " ").replace("-", " ")
-        store.update_session_title(session_id, clean_title)
+        clean_title = clean_filename.rsplit(".", 1)[0].replace("_", " ").replace("-", " ")
+        store.update_session_title(session_id, clean_title[:60])
 
-    # Background async processing: parse, chunk, index, update status
+    # Background async processing with timeout protection
     async def _process_document_background(d_id: str, s_id: str, f_path: str, f_name: str):
         try:
             logger.info("Background processing started for '%s' (id: %s)", f_name, d_id)
-            doc_text, metadata = await asyncio.to_thread(parser.parse, f_path, f_name)
-            chunks = await asyncio.to_thread(
-                chunker.chunk_document, doc_text, d_id, s_id, metadata
+            doc_text, metadata = await asyncio.wait_for(
+                asyncio.to_thread(parser.parse, f_path, f_name),
+                timeout=settings.parse_timeout,
             )
-            await asyncio.to_thread(retriever.index_session_chunks, s_id, chunks)
+            chunks = await asyncio.wait_for(
+                asyncio.to_thread(chunker.chunk_document, doc_text, d_id, s_id, metadata),
+                timeout=settings.parse_timeout,
+            )
+            await asyncio.wait_for(
+                asyncio.to_thread(retriever.index_session_chunks, s_id, chunks),
+                timeout=settings.index_timeout,
+            )
 
             w_count = metadata.get("word_count", len(doc_text.split()))
             store.update_document_processed(
@@ -284,6 +330,15 @@ async def upload_document_to_session(
                 status="ready",
             )
             logger.info("Background processing complete for '%s' ✓ (%d chunks indexed)", f_name, len(chunks))
+        except asyncio.TimeoutError:
+            logger.error("Processing timed out for document '%s'", f_name)
+            store.update_document_processed(
+                doc_id=d_id,
+                chunk_count=0,
+                char_count=0,
+                word_count=0,
+                status="error",
+            )
         except Exception as exc:
             logger.exception("Background processing failed for '%s': %s", f_name, exc)
             store.update_document_processed(
@@ -294,12 +349,12 @@ async def upload_document_to_session(
                 status="error",
             )
 
-    background_tasks.add_task(_process_document_background, doc_id, session_id, file_path, file.filename)
+    background_tasks.add_task(_process_document_background, doc_id, session_id, file_path, clean_filename)
 
     return {
         "doc_id": doc_id,
         "session_id": session_id,
-        "filename": file.filename,
+        "filename": clean_filename,
         "chunk_count": 0,
         "char_count": 0,
         "word_count": 0,
@@ -381,6 +436,7 @@ CROSS-SESSION GLOBAL MEMORY (Context from past conversations):
 
 
 @app.post("/api/chat")
+@limiter.limit(settings.rate_limit_chat)
 async def chat(request: Request, body: ChatRequest):
     keys = _api_keys(request)
     if not any(keys.values()):
@@ -517,6 +573,7 @@ async def chat(request: Request, body: ChatRequest):
 # ──────────────────────────────────────────────
 
 @app.post("/api/sessions/{session_id}/summarize")
+@limiter.limit(settings.rate_limit_summarize)
 async def summarize_session(session_id: str, request: Request):
     keys = _api_keys(request)
     if not any(keys.values()):

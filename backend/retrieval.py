@@ -22,6 +22,9 @@ import numpy as np
 
 from chunker import Chunk, FastSubwordVectorizer
 
+from collections import Counter, OrderedDict
+import json
+
 logger = logging.getLogger(__name__)
 
 # Graceful import of rank_bm25
@@ -31,6 +34,36 @@ try:
     _HAVE_BM25 = True
 except ImportError:
     logger.warning("rank_bm25 not installed. Using built-in BM25 implementation.")
+
+
+def _chunk_to_dict(c: Chunk) -> dict:
+    return {
+        "id": c.id,
+        "text": c.text,
+        "contextual_text": c.contextual_text,
+        "parent_id": c.parent_id,
+        "parent_text": c.parent_text,
+        "doc_id": c.doc_id,
+        "session_id": c.session_id,
+        "chunk_index": c.chunk_index,
+        "parent_index": c.parent_index,
+        "metadata": c.metadata,
+    }
+
+
+def _dict_to_chunk(d: dict) -> Chunk:
+    return Chunk(
+        id=d["id"],
+        text=d["text"],
+        contextual_text=d["contextual_text"],
+        parent_id=d["parent_id"],
+        parent_text=d["parent_text"],
+        doc_id=d["doc_id"],
+        session_id=d["session_id"],
+        chunk_index=d["chunk_index"],
+        parent_index=d["parent_index"],
+        metadata=d.get("metadata", {}),
+    )
 
 
 class SimpleBM25:
@@ -91,11 +124,13 @@ class HybridRetriever:
         index_dir: str = "./data/indexes",
         top_k: int = 5,
         candidates_k: int = 50,
+        max_cached_sessions: int = 30,
         load_neural: bool = True,
     ):
         self.index_dir = index_dir
         self.top_k = top_k
         self.candidates_k = candidates_k
+        self.max_cached_sessions = max_cached_sessions
         os.makedirs(index_dir, exist_ok=True)
 
         self._bi_encoder = None
@@ -103,10 +138,10 @@ class HybridRetriever:
         self._fallback_vectorizer = FastSubwordVectorizer()
         self._on_model_ready_callbacks = []
 
-        # In-memory indexes keyed by session_id
-        self._session_bm25: Dict[str, Any] = {}
-        self._session_embeddings: Dict[str, np.ndarray] = {}
-        self._session_chunks: Dict[str, List[Chunk]] = {}
+        # In-memory LRU indexes keyed by session_id
+        self._session_bm25: OrderedDict[str, Any] = OrderedDict()
+        self._session_embeddings: OrderedDict[str, np.ndarray] = OrderedDict()
+        self._session_chunks: OrderedDict[str, List[Chunk]] = OrderedDict()
 
         if _HAVE_SENTENCE_TRANSFORMERS and load_neural:
             # Load neural models asynchronously so server startup is instantaneous
@@ -145,6 +180,14 @@ class HybridRetriever:
         except Exception as exc:
             logger.warning("Neural transformer background load notice: %s. Continuing with fast subword embeddings.", exc)
 
+    def _evict_lru_if_needed(self):
+        """Evict oldest cached session indexes if RAM capacity is exceeded."""
+        while len(self._session_chunks) > self.max_cached_sessions:
+            oldest_sid, _ = self._session_chunks.popitem(last=False)
+            self._session_bm25.pop(oldest_sid, None)
+            self._session_embeddings.pop(oldest_sid, None)
+            logger.debug("Evicted session %s index from memory cache", oldest_sid)
+
     # ──────────────────────────────────────────────────────────────────────
     # Document Indexing (Session Scoped)
     # ──────────────────────────────────────────────────────────────────────
@@ -176,13 +219,17 @@ class HybridRetriever:
         else:
             embeddings = self._fallback_vectorizer.encode(texts).astype(np.float32)
 
-        # Cache in memory
+        # Cache in memory (update LRU)
         self._session_bm25[session_id] = bm25
         self._session_embeddings[session_id] = embeddings
         self._session_chunks[session_id] = combined_chunks
+        self._session_chunks.move_to_end(session_id)
+        self._session_bm25.move_to_end(session_id)
+        self._session_embeddings.move_to_end(session_id)
+        self._evict_lru_if_needed()
 
-        # Persist
-        self._save_session_index(session_id, bm25, embeddings, combined_chunks)
+        # Persist safely to disk
+        self._save_session_index(session_id, embeddings, combined_chunks)
         logger.info("Session %s indexed (%d total chunks across all session docs)", session_id, len(combined_chunks))
 
     def remove_document_from_session(self, session_id: str, doc_id: str) -> None:
@@ -198,15 +245,23 @@ class HybridRetriever:
         self._session_bm25.pop(session_id, None)
         self._session_embeddings.pop(session_id, None)
         self._session_chunks.pop(session_id, None)
-        path = os.path.join(self.index_dir, f"session_{session_id}.pkl")
-        if os.path.exists(path):
-            try:
-                os.remove(path)
-            except OSError:
-                pass
+        
+        # Clean both safe npz and legacy pkl
+        for ext in (".npz", ".pkl"):
+            path = os.path.join(self.index_dir, f"session_{session_id}{ext}")
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
 
     def get_session_chunks(self, session_id: str) -> List[Chunk]:
         if session_id in self._session_chunks:
+            self._session_chunks.move_to_end(session_id)
+            if session_id in self._session_bm25:
+                self._session_bm25.move_to_end(session_id)
+            if session_id in self._session_embeddings:
+                self._session_embeddings.move_to_end(session_id)
             return self._session_chunks[session_id]
         try:
             self._load_session_index(session_id)
@@ -379,20 +434,58 @@ class HybridRetriever:
         return recalled
 
     # ──────────────────────────────────────────────────────────────────────
-    # Persistence
+    # Persistence (Safe NPZ + JSON Serialization, Zero Pickle Vulnerability)
     # ──────────────────────────────────────────────────────────────────────
 
-    def _save_session_index(self, session_id: str, bm25: Any, embeddings: np.ndarray, chunks: List[Chunk]):
-        path = os.path.join(self.index_dir, f"session_{session_id}.pkl")
-        with open(path, "wb") as f:
-            pickle.dump({"bm25": bm25, "embeddings": embeddings, "chunks": chunks}, f)
+    def _save_session_index(self, session_id: str, embeddings: np.ndarray, chunks: List[Chunk]):
+        path = os.path.join(self.index_dir, f"session_{session_id}.npz")
+        chunks_json_str = json.dumps([_chunk_to_dict(c) for c in chunks], ensure_ascii=False)
+        np.savez_compressed(
+            path,
+            embeddings=embeddings,
+            chunks_json=np.array(chunks_json_str, dtype=object),
+        )
 
     def _load_session_index(self, session_id: str):
-        path = os.path.join(self.index_dir, f"session_{session_id}.pkl")
-        if not os.path.exists(path):
-            return
-        with open(path, "rb") as f:
-            data = pickle.load(f)
-        self._session_bm25[session_id] = data["bm25"]
-        self._session_embeddings[session_id] = data["embeddings"]
-        self._session_chunks[session_id] = data["chunks"]
+        npz_path = os.path.join(self.index_dir, f"session_{session_id}.npz")
+        if os.path.exists(npz_path):
+            try:
+                # Load embeddings and chunks cleanly
+                data = np.load(npz_path, allow_pickle=True)
+                embeddings = data["embeddings"]
+                chunks_json_str = str(data["chunks_json"])
+                chunks_data = json.loads(chunks_json_str)
+                chunks = [_dict_to_chunk(d) for d in chunks_data]
+
+                # Reconstruct BM25 model
+                tokenized = [c.contextual_text.lower().split() for c in chunks]
+                bm25 = BM25Okapi(tokenized) if _HAVE_BM25 else SimpleBM25(tokenized)
+
+                self._session_bm25[session_id] = bm25
+                self._session_embeddings[session_id] = embeddings
+                self._session_chunks[session_id] = chunks
+                self._session_chunks.move_to_end(session_id)
+                self._session_bm25.move_to_end(session_id)
+                self._session_embeddings.move_to_end(session_id)
+                self._evict_lru_if_needed()
+                return
+            except Exception as exc:
+                logger.warning("Failed to load session index from %s: %s", npz_path, exc)
+
+        # Legacy fallback if pkl exists
+        pkl_path = os.path.join(self.index_dir, f"session_{session_id}.pkl")
+        if os.path.exists(pkl_path):
+            try:
+                with open(pkl_path, "rb") as f:
+                    data = pickle.load(f)
+                self._session_bm25[session_id] = data["bm25"]
+                self._session_embeddings[session_id] = data["embeddings"]
+                self._session_chunks[session_id] = data["chunks"]
+                # Convert to new safe format
+                self._save_session_index(session_id, data["embeddings"], data["chunks"])
+                try:
+                    os.remove(pkl_path)
+                except OSError:
+                    pass
+            except Exception as exc:
+                logger.warning("Failed to load legacy pkl index: %s", exc)
