@@ -3,7 +3,7 @@
 import { ApiKeys, Document, Message, Session, Source, MemoryItem, SystemStats } from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL
-  ? `${process.env.NEXT_PUBLIC_BACKEND_URL.replace(/\/+$/, "")}/api`
+  ? `${process.env.NEXT_PUBLIC_BACKEND_URL.replace(/\/+$/, "").replace(/\/api$/, "")}/api`
   : "/api/backend";
 
 function buildHeaders(keys: Partial<ApiKeys>): HeadersInit {
