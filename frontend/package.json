@@ -10,15 +10,19 @@
   "dependencies": {
     "date-fns": "^4.4.0",
     "framer-motion": "^13.1.1",
+    "katex": "^0.18.4",
     "lucide-react": "^1.37.0",
     "next": "16.3.3",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "react-dropzone": "^20.1.1",
     "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1"
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0"
   },
   "devDependencies": {
+    "@types/katex": "^0.16.8",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",

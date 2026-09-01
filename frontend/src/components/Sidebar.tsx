@@ -16,11 +16,13 @@ import {
   Search,
   Command,
   HelpCircle,
+  Edit3,
+  Check,
 } from "lucide-react";
 import { format, isToday, isYesterday, parseISO } from "date-fns";
 import { motion, AnimatePresence } from "framer-motion";
 import { Session, ApiKeys } from "@/lib/types";
-import { deleteSession, deleteAllSessions } from "@/lib/api";
+import { deleteSession, deleteAllSessions, renameSession } from "@/lib/api";
 
 interface SidebarProps {
   isOpen: boolean;
@@ -31,9 +33,14 @@ interface SidebarProps {
   onNewChat: () => void;
   onSelectSession: (session: Session) => void;
   onSessionDeleted: (id: string) => void;
+  onSessionRenamed?: (id: string, newTitle: string) => void;
   onAllSessionsDeleted?: () => void;
   onOpenSettings: () => void;
   onOpenShortcuts?: () => void;
+  onOpenCompare?: () => void;
+  onOpenQuiz?: () => void;
+  onOpenMemoryInspector?: () => void;
+  onOpenUrlIngest?: () => void;
   onCloseSidebar: () => void;
 }
 
@@ -64,15 +71,54 @@ export default function Sidebar({
   onNewChat,
   onSelectSession,
   onSessionDeleted,
+  onSessionRenamed,
   onAllSessionsDeleted,
   onOpenSettings,
   onOpenShortcuts,
+  onOpenCompare,
+  onOpenQuiz,
+  onOpenMemoryInspector,
+  onOpenUrlIngest,
   onCloseSidebar,
 }: SidebarProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [deletingSession, setDeletingSession] = useState<string | null>(null);
   const [confirmClearAll, setConfirmClearAll] = useState(false);
   const [isClearingAll, setIsClearingAll] = useState(false);
+
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState("");
+  const [isRenaming, setIsRenaming] = useState(false);
+
+  const handleStartEdit = (e: React.MouseEvent, s: Session) => {
+    e.stopPropagation();
+    setEditingSessionId(s.id);
+    setEditingTitle(s.title || "");
+  };
+
+  const handleSaveEdit = async (e?: React.FormEvent | React.MouseEvent, sessionId?: string) => {
+    if (e) {
+      e.stopPropagation();
+      e.preventDefault();
+    }
+    const targetId = sessionId || editingSessionId;
+    if (!targetId) return;
+    const cleanTitle = editingTitle.trim();
+    if (!cleanTitle) {
+      setEditingSessionId(null);
+      return;
+    }
+    setIsRenaming(true);
+    try {
+      const updated = await renameSession(targetId, cleanTitle);
+      onSessionRenamed?.(targetId, updated);
+    } catch (err) {
+      console.warn("Failed to rename session:", err);
+    } finally {
+      setIsRenaming(false);
+      setEditingSessionId(null);
+    }
+  };
 
   const filteredSessions = useMemo(() => {
     if (!searchQuery.trim()) return sessions;
@@ -187,6 +233,50 @@ export default function Sidebar({
           <span>New Conversation</span>
         </motion.button>
 
+        {/* Quick Action Tools */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginTop: 8 }}>
+          {onOpenQuiz && (
+            <button
+              onClick={onOpenQuiz}
+              className="btn btn-outline"
+              style={{ padding: "6px 8px", fontSize: 11, justifyContent: "center" }}
+              title="Generate Interactive Quiz"
+            >
+              💡 Quiz
+            </button>
+          )}
+          {onOpenCompare && (
+            <button
+              onClick={onOpenCompare}
+              className="btn btn-outline"
+              style={{ padding: "6px 8px", fontSize: 11, justifyContent: "center" }}
+              title="Compare Session Documents"
+            >
+              ⚖️ Compare
+            </button>
+          )}
+          {onOpenMemoryInspector && (
+            <button
+              onClick={onOpenMemoryInspector}
+              className="btn btn-outline"
+              style={{ padding: "6px 8px", fontSize: 11, justifyContent: "center" }}
+              title="Cross-Session Memory Inspector"
+            >
+              🧠 Memory
+            </button>
+          )}
+          {onOpenUrlIngest && (
+            <button
+              onClick={onOpenUrlIngest}
+              className="btn btn-outline"
+              style={{ padding: "6px 8px", fontSize: 11, justifyContent: "center" }}
+              title="Ingest Web Page URL"
+            >
+              🌐 Add URL
+            </button>
+          )}
+        </div>
+
         {/* Live Search Input */}
         {sessions.length > 2 && (
           <div className="sidebar-search-wrapper">
@@ -269,7 +359,42 @@ export default function Sidebar({
                       <MessageSquare size={14} />
                     </div>
                     <div className="sidebar-item-content">
-                      <div className="sidebar-item-title">{s.title || "Untitled Conversation"}</div>
+                      {editingSessionId === s.id ? (
+                        <form
+                          onSubmit={(e) => handleSaveEdit(e, s.id)}
+                          onClick={(e) => e.stopPropagation()}
+                          style={{ display: "flex", alignItems: "center", gap: 4, width: "100%" }}
+                        >
+                          <input
+                            type="text"
+                            value={editingTitle}
+                            onChange={(e) => setEditingTitle(e.target.value)}
+                            onBlur={(e) => handleSaveEdit(e, s.id)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Escape") setEditingSessionId(null);
+                            }}
+                            autoFocus
+                            style={{
+                              background: "#1E1E24",
+                              border: "1px solid rgba(255, 255, 255, 0.4)",
+                              borderRadius: 4,
+                              color: "#FFFFFF",
+                              fontSize: 12,
+                              padding: "2px 6px",
+                              width: "100%",
+                              outline: "none",
+                            }}
+                          />
+                        </form>
+                      ) : (
+                        <div
+                          className="sidebar-item-title"
+                          onDoubleClick={(e) => handleStartEdit(e, s)}
+                          title="Double click to rename"
+                        >
+                          {s.title || "Untitled Conversation"}
+                        </div>
+                      )}
                       <div className="sidebar-item-meta">
                         {docCount > 0 ? (
                           <span style={{ color: "#FFFFFF", display: "inline-flex", alignItems: "center", gap: 3 }}>
@@ -284,6 +409,15 @@ export default function Sidebar({
                       </div>
                     </div>
                     <div className="sidebar-item-actions">
+                      <motion.button
+                        className="icon-btn"
+                        onClick={(e) => handleStartEdit(e, s)}
+                        title="Rename conversation"
+                        whileHover={{ scale: 1.2, color: "#FFFFFF" }}
+                        whileTap={{ scale: 0.85 }}
+                      >
+                        <Edit3 size={11} />
+                      </motion.button>
                       <motion.button
                         className="icon-btn"
                         onClick={(e) => handleDeleteSession(e, s.id)}

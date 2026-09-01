@@ -6,14 +6,6 @@ const cleanBackendUrl = (process.env.BACKEND_INTERNAL_URL || process.env.NEXT_PU
 
 const nextConfig: NextConfig = {
   allowedDevOrigins: ["192.168.0.9", "localhost:3000", "192.168.0.9:3000"],
-  async rewrites() {
-    return [
-      {
-        source: "/api/backend/:path*",
-        destination: `${cleanBackendUrl}/api/:path*`,
-      },
-    ];
-  },
   async headers() {
     return [
       {

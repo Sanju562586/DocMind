@@ -396,3 +396,27 @@ class LLMRouter:
         error_details = "\n".join(f"• {e}" for e in errors) if errors else "No valid API keys configured."
         raise RuntimeError(f"All LLM providers failed:\n{error_details}\n\nPlease verify your API keys or rate limits in Settings.")
 
+    async def generate_complete(
+        self,
+        messages: List[Dict],
+        gemini_key: Optional[str] = None,
+        groq_key: Optional[str] = None,
+        openrouter_key: Optional[str] = None,
+        gemini_model: Optional[str] = None,
+        groq_model: Optional[str] = None,
+        openrouter_model: Optional[str] = None,
+    ) -> str:
+        """Accumulates all streaming tokens into a complete response string."""
+        tokens: List[str] = []
+        async for token in self.stream(
+            messages=messages,
+            gemini_key=gemini_key,
+            groq_key=groq_key,
+            openrouter_key=openrouter_key,
+            gemini_model=gemini_model,
+            groq_model=groq_model,
+            openrouter_model=openrouter_model,
+        ):
+            tokens.append(token)
+        return "".join(tokens)
+

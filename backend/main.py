@@ -10,6 +10,7 @@ import re
 import sys
 import uuid
 from contextlib import asynccontextmanager
+from typing import Optional, List, Dict, Any
 
 # Ensure backend directory is in sys.path
 backend_dir = os.path.dirname(os.path.abspath(__file__))
@@ -28,7 +29,11 @@ from chunker import HierarchicalSemanticChunker
 from config import get_settings
 from document_parser import DocumentParser
 from llm_router import LLMRouter
-from models import ChatRequest, SessionCreate, SessionTitleUpdate
+from models import (
+    ChatRequest, SessionCreate, SessionTitleUpdate,
+    UrlIngestRequest, CompareRequest, QuizRequest,
+    DocumentResponse, MemoryItem, SourceItem, MessageResponse, SessionResponse
+)
 from retrieval import HybridRetriever
 from session_store import SessionStore
 
@@ -37,11 +42,11 @@ logger = logging.getLogger("docmind")
 
 settings = get_settings()
 
-parser: DocumentParser = None        # type: ignore[assignment]
-chunker: HierarchicalSemanticChunker = None  # type: ignore[assignment]
-retriever: HybridRetriever = None    # type: ignore[assignment]
-store: SessionStore = None           # type: ignore[assignment]
-router_llm: LLMRouter = None        # type: ignore[assignment]
+parser: Optional[DocumentParser] = None
+chunker: Optional[HierarchicalSemanticChunker] = None
+retriever: Optional[HybridRetriever] = None
+store: Optional[SessionStore] = None
+router_llm: Optional[LLMRouter] = None
 
 
 @asynccontextmanager
@@ -423,6 +428,10 @@ Then provide the best general answer you can from your knowledge.
 - If the query is partially answered by the document, answer the documented part first (citing it), then use the disclosure block for the remainder.
 - If no documents are uploaded, always use the disclosure block before any answer.
 - Use clean, well-structured Markdown with headings, bullet points, and code formatting where relevant.
+- For mathematical expressions and formulas, use standard LaTeX syntax:
+  * Inline formulas: `$variable$` (e.g. `$w_t$`, `$\eta$`, `$g_t$`, `$v_{{t+1}}$`), always with NO space immediately following the opening `$` or preceding the closing `$`.
+  * Standalone display equations: Put `$$` on its own separate line before and after the formula.
+  * Never wrap Markdown headings (e.g. `###`, `####`), bold labels, or tables inside dollar signs.
 
 ============================================================
 CURRENT CHAT DOCUMENT CONTEXT:
@@ -512,6 +521,9 @@ async def chat(request: Request, body: ChatRequest):
             {
                 "child_text": r["child_text"],
                 "section": r["metadata"].get("section", "Document"),
+                "doc_id": r["metadata"].get("doc_id"),
+                "title": r["metadata"].get("title") or r["metadata"].get("source") or "Document",
+                "page_number": r["metadata"].get("page_number"),
                 "rerank_score": r["rerank_score"],
                 "bm25_score": r["bm25_score"],
                 "dense_score": r["dense_score"],
@@ -564,7 +576,12 @@ async def chat(request: Request, body: ChatRequest):
     return StreamingResponse(
         generate(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={
+            "Content-Type": "text/event-stream; charset=utf-8",
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
@@ -629,8 +646,237 @@ async def summarize_session(session_id: str, request: Request):
     return StreamingResponse(
         generate(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={
+            "Content-Type": "text/event-stream; charset=utf-8",
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
+
+
+# ──────────────────────────────────────────────
+# Web URL Ingestion Endpoint
+# ──────────────────────────────────────────────
+
+@app.post("/api/sessions/{session_id}/url")
+async def ingest_url_to_session(
+    session_id: str,
+    body: UrlIngestRequest,
+    background_tasks: BackgroundTasks
+):
+    session = store.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    url = body.url.strip()
+    doc_id = str(uuid.uuid4())
+    domain_name = url.split("//")[-1].split("/")[0]
+    clean_filename = f"URL_{domain_name}_{doc_id[:6]}"
+
+    # Fetch and parse URL text synchronously/async
+    try:
+        url_text, metadata = parser.parse_url(url)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to ingest URL: {exc}")
+
+    # Save to database immediately
+    store.save_document(
+        doc_id=doc_id,
+        session_id=session_id,
+        filename=metadata.get("title") or clean_filename,
+        chunk_count=0,
+        char_count=len(url_text),
+        word_count=len(url_text.split()),
+        file_type="url",
+        file_path=url,
+        status="processing",
+    )
+
+    # Background async chunking & indexing
+    async def _process_url_background(d_id: str, s_id: str, text: str, meta: dict):
+        try:
+            chunks = await asyncio.wait_for(
+                asyncio.to_thread(chunker.chunk_document, text, d_id, s_id, meta),
+                timeout=settings.parse_timeout,
+            )
+            await asyncio.wait_for(
+                asyncio.to_thread(retriever.index_session_chunks, s_id, chunks),
+                timeout=settings.index_timeout,
+            )
+            store.update_document_processed(
+                doc_id=d_id,
+                chunk_count=len(chunks),
+                char_count=len(text),
+                word_count=len(text.split()),
+                status="ready",
+            )
+            logger.info("URL processing complete for '%s' ✓ (%d chunks indexed)", url, len(chunks))
+        except Exception as exc:
+            logger.exception("URL background processing failed for '%s': %s", url, exc)
+            store.update_document_processed(
+                doc_id=d_id, chunk_count=0, char_count=0, word_count=0, status="error"
+            )
+
+    background_tasks.add_task(_process_url_background, doc_id, session_id, url_text, metadata)
+
+    return {
+        "doc_id": doc_id,
+        "session_id": session_id,
+        "filename": metadata.get("title") or clean_filename,
+        "file_type": "url",
+        "status": "processing",
+        "message": "Successfully initiated URL ingestion",
+    }
+
+
+# ──────────────────────────────────────────────
+# Multi-Document Comparison Matrix Endpoint
+# ──────────────────────────────────────────────
+
+@app.post("/api/sessions/{session_id}/compare")
+async def compare_documents(session_id: str, request: Request, body: CompareRequest):
+    keys = _api_keys(request)
+    if not any(keys.values()):
+        raise HTTPException(status_code=400, detail="No API keys configured.")
+
+    session = store.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    docs = session.get("documents", [])
+    if not docs:
+        raise HTTPException(status_code=400, detail="No documents uploaded in this chat session to compare.")
+
+    selected_docs = [d for d in docs if not body.doc_ids or d["doc_id"] in body.doc_ids]
+    if len(selected_docs) < 2:
+        raise HTTPException(
+            status_code=400,
+            detail="At least 2 documents are required for comparison. Please upload another file.",
+        )
+
+    # Retrieve context chunks for each document
+    doc_contexts = []
+    for d in selected_docs[:4]:  # Max 4 docs for comparison matrix
+        chunks = await asyncio.to_thread(
+            retriever.retrieve, session_id, f"overview key points {body.focus_topic}", top_k=5
+        )
+        # Filter chunks for this doc if doc_id matches
+        doc_chunks = [c for c in chunks if c.get("metadata", {}).get("doc_id") == d["doc_id"]]
+        if not doc_chunks:
+            doc_chunks = chunks[:3]
+        text_summary = "\n".join([c["child_text"] for c in doc_chunks])
+        doc_contexts.append(f"### DOCUMENT: {d['filename']}\n{text_summary}")
+
+    comparison_prompt = (
+        f"You are DocMind. Generate a comprehensive Side-by-Side Comparison Matrix analyzing these documents.\n"
+        f"Focus Area: {body.focus_topic}\n\n"
+        f"DOCUMENT CONTENTS:\n" + "\n\n".join(doc_contexts) + "\n\n"
+        f"Provide your output in Markdown with:\n"
+        f"1. Executive Comparative Summary\n"
+        f"2. Side-by-Side Feature / Content Comparison Table\n"
+        f"3. Key Similarities & Differences\n"
+        f"4. Strategic Takeaway & Recommendations"
+    )
+
+    messages = [
+        {"role": "system", "content": "You are a professional document intelligence analyst."},
+        {"role": "user", "content": comparison_prompt},
+    ]
+
+    async def generate():
+        try:
+            async for token in router_llm.stream(
+                messages,
+                gemini_key=keys["gemini"],
+                groq_key=keys["groq"],
+                openrouter_key=keys["openrouter"],
+                gemini_model=settings.gemini_model,
+                groq_model=settings.groq_model,
+                openrouter_model=settings.openrouter_model,
+            ):
+                yield _sse({"type": "token", "content": token})
+            yield _sse({"type": "done"})
+        except Exception as exc:
+            yield _sse({"type": "error", "message": str(exc)})
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Content-Type": "text/event-stream; charset=utf-8",
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ──────────────────────────────────────────────
+# Interactive Quiz & Flashcard Generator
+# ──────────────────────────────────────────────
+
+@app.post("/api/sessions/{session_id}/quiz")
+async def generate_quiz(session_id: str, request: Request, body: QuizRequest):
+    keys = _api_keys(request)
+    if not any(keys.values()):
+        raise HTTPException(status_code=400, detail="No API keys configured.")
+
+    session = store.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    docs = session.get("documents", [])
+    if not docs:
+        raise HTTPException(status_code=400, detail="No documents found in session to generate quiz.")
+
+    retrieved = await asyncio.to_thread(
+        retriever.retrieve, session_id, "key concepts definitions important facts formulas summary", top_k=10
+    )
+    context = "\n\n".join(r["parent_text"] for r in retrieved) if retrieved else "Document content preview."
+
+    prompt = (
+        f"Based on the following document context, generate exactly {body.num_questions} interactive multiple-choice quiz questions.\n"
+        f"Format your response as a valid JSON array of objects with keys:\n"
+        f'- "question": string\n'
+        f'- "options": array of 4 strings\n'
+        f'- "correct_index": integer (0, 1, 2, or 3)\n'
+        f'- "explanation": string explaining why the answer is correct\n\n'
+        f"DOCUMENT CONTEXT:\n{context}\n\n"
+        f"Return ONLY valid JSON without markdown quotes."
+    )
+
+    messages = [
+        {"role": "system", "content": "You are an expert quiz generator. Return only raw JSON arrays."},
+        {"role": "user", "content": prompt},
+    ]
+
+    try:
+        raw_json = await router_llm.generate_complete(
+            messages,
+            gemini_key=keys["gemini"],
+            groq_key=keys["groq"],
+            openrouter_key=keys["openrouter"],
+            gemini_model=settings.gemini_model,
+            groq_model=settings.groq_model,
+            openrouter_model=settings.openrouter_model,
+        )
+
+        # Clean JSON markdown fences and extract array
+        clean_str = re.sub(r"^```(?:json)?", "", raw_json.strip(), flags=re.IGNORECASE)
+        clean_str = re.sub(r"```$", "", clean_str.strip()).strip()
+        try:
+            quiz_data = json.loads(clean_str)
+        except json.JSONDecodeError:
+            array_match = re.search(r"\[[\s\S]*\]", clean_str)
+            if array_match:
+                quiz_data = json.loads(array_match.group(0))
+            else:
+                raise
+        return {"session_id": session_id, "quiz": quiz_data}
+    except Exception as exc:
+        logger.exception("Quiz generation error: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Failed to generate quiz: {exc}")
 
 
 if __name__ == "__main__":

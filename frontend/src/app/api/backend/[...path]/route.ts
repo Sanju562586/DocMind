@@ -1,0 +1,89 @@
+import { NextRequest, NextResponse } from "next/server";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+const BACKEND_URL = (
+  process.env.BACKEND_INTERNAL_URL ||
+  process.env.NEXT_PUBLIC_BACKEND_URL ||
+  "http://127.0.0.1:8000"
+)
+  .replace(/\/+$/, "")
+  .replace(/\/api$/, "");
+
+async function handleProxy(
+  req: NextRequest,
+  { params }: { params: Promise<{ path: string[] }> }
+) {
+  const resolvedParams = await params;
+  const path = resolvedParams?.path;
+  const targetPath = path ? path.join("/") : "";
+  const targetUrl = new URL(`${BACKEND_URL}/api/${targetPath}`);
+
+  // Forward search query params
+  req.nextUrl.searchParams.forEach((val, key) => {
+    targetUrl.searchParams.set(key, val);
+  });
+
+  // Forward incoming headers (except host and content-length)
+  const headers = new Headers();
+  req.headers.forEach((val, key) => {
+    const lower = key.toLowerCase();
+    if (lower !== "host" && lower !== "content-length" && lower !== "connection") {
+      headers.set(key, val);
+    }
+  });
+
+  const method = req.method;
+  const isBodyAllowed = method !== "GET" && method !== "HEAD";
+  const body = isBodyAllowed ? req.body : undefined;
+
+  try {
+    const res = await fetch(targetUrl.toString(), {
+      method,
+      headers,
+      body,
+      // @ts-expect-error - duplex is required for streaming request bodies in Node fetch
+      duplex: isBodyAllowed && body ? "half" : undefined,
+      cache: "no-store",
+    });
+
+    const isSSE = res.headers.get("content-type")?.includes("text/event-stream");
+
+    const responseHeaders = new Headers();
+    res.headers.forEach((val, key) => {
+      const lower = key.toLowerCase();
+      // Drop content-length and content-encoding on chunked/SSE streams to prevent browser chunk errors
+      if (isSSE && (lower === "content-length" || lower === "content-encoding")) {
+        return;
+      }
+      responseHeaders.set(key, val);
+    });
+
+    if (isSSE) {
+      responseHeaders.set("Content-Type", "text/event-stream; charset=utf-8");
+      responseHeaders.set("Cache-Control", "no-cache, no-transform");
+      responseHeaders.set("Connection", "keep-alive");
+      responseHeaders.set("X-Accel-Buffering", "no");
+    }
+
+    return new Response(res.body, {
+      status: res.status,
+      statusText: res.statusText,
+      headers: responseHeaders,
+    });
+  } catch (err: unknown) {
+    const errorMsg = err instanceof Error ? err.message : "Proxy connection failed";
+    return NextResponse.json(
+      { detail: `Backend proxy error: ${errorMsg}. Please verify backend server is running.` },
+      { status: 502 }
+    );
+  }
+}
+
+export const GET = handleProxy;
+export const POST = handleProxy;
+export const PATCH = handleProxy;
+export const DELETE = handleProxy;
+export const PUT = handleProxy;
+export const HEAD = handleProxy;

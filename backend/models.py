@@ -87,3 +87,25 @@ class SessionResponse(BaseModel):
     updated_at: str
     documents: List[DocumentResponse] = Field(default_factory=list)
     message_count: int = 0
+
+
+class UrlIngestRequest(BaseModel):
+    url: str = Field(..., min_length=4, max_length=2000)
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        s = v.strip()
+        if not s.startswith("http://") and not s.startswith("https://"):
+            raise ValueError("URL must start with http:// or https://")
+        return s
+
+
+class CompareRequest(BaseModel):
+    doc_ids: Optional[List[str]] = Field(default_factory=list)
+    focus_topic: Optional[str] = Field(default="Executive Overview & Key Differences")
+
+
+class QuizRequest(BaseModel):
+    num_questions: Optional[int] = Field(default=5, ge=1, le=15)
+

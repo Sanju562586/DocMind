@@ -33,6 +33,10 @@ import { GlobalMemoryModal } from "@/components/GlobalMemoryModal";
 import { PipelineModal } from "@/components/PipelineModal";
 import KeyboardShortcutsModal from "@/components/KeyboardShortcutsModal";
 import InteractiveBackground from "@/components/InteractiveBackground";
+import { QuizModal } from "@/components/QuizModal";
+import { CompareModal } from "@/components/CompareModal";
+import { UrlIngestModal } from "@/components/UrlIngestModal";
+import { DocumentViewerModal } from "@/components/DocumentViewerModal";
 import {
   listSessions,
   createSession,
@@ -45,6 +49,13 @@ import {
   listSessionDocuments,
   renameSession,
   uploadDocumentToSession,
+  ingestUrl,
+  compareDocuments,
+  generateQuiz,
+  listAllMemories,
+  deleteMemoryItem,
+  clearAllMemories,
+  QuizQuestion,
 } from "@/lib/api";
 import { ApiKeys, Document, Message, Session, Source, MemoryItem } from "@/lib/types";
 
@@ -117,6 +128,176 @@ export default function HomePage() {
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [editingTitleValue, setEditingTitleValue] = useState("");
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+
+  // New Upgrade Feature States
+  const [isQuizOpen, setIsQuizOpen] = useState(false);
+  const [quizQuestions, setQuizQuestions] = useState<QuizQuestion[]>([]);
+  const [isQuizLoading, setIsQuizLoading] = useState(false);
+
+  const [isCompareOpen, setIsCompareOpen] = useState(false);
+  const [isCompareLoading, setIsCompareLoading] = useState(false);
+  const [compareResult, setCompareResult] = useState("");
+
+  const [isMemoryInspectorOpen, setIsMemoryInspectorOpen] = useState(false);
+  const [globalMemories, setGlobalMemories] = useState<MemoryItem[]>([]);
+  const [isMemoryLoading, setIsMemoryLoading] = useState(false);
+
+  const [isUrlModalOpen, setIsUrlModalOpen] = useState(false);
+  const [urlInputValue, setUrlInputValue] = useState("");
+  const [isUrlLoading, setIsUrlLoading] = useState(false);
+
+  const [viewerDoc, setViewerDoc] = useState<Document | null>(null);
+  const [viewerPage, setViewerPage] = useState(1);
+  const [isViewerOpen, setIsViewerOpen] = useState(false);
+
+  // Handler functions for upgrade tools
+  const handleOpenQuiz = async () => {
+    setIsQuizOpen(true);
+    if (activeSession && activeSession.documents && activeSession.documents.length > 0 && quizQuestions.length === 0) {
+      handleGenerateQuiz(activeSession.id, 5);
+    }
+  };
+
+  const handleGenerateQuiz = async (sessionId: string, numQ: number = 5) => {
+    setIsQuizLoading(true);
+    try {
+      const questions = await generateQuiz(sessionId, apiKeys, numQ);
+      setQuizQuestions(questions);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Failed to generate quiz. Please check API keys.");
+    } finally {
+      setIsQuizLoading(false);
+    }
+  };
+
+  const handleStartComparison = async (docIds: string[], focusTopic: string) => {
+    let targetSession = activeSession;
+    if (!targetSession) {
+      try {
+        const newId = await createSession("Document Comparison");
+        const updatedList = await listSessions();
+        setSessions(updatedList);
+        targetSession = updatedList.find((s) => s.id === newId) || null;
+        if (targetSession) setActiveSession(targetSession);
+      } catch {
+        showToast("Failed to initialize session for comparison");
+        return;
+      }
+    }
+    if (!targetSession) return;
+
+    setIsCompareLoading(true);
+    setCompareResult("");
+    try {
+      await compareDocuments(targetSession.id, docIds, focusTopic, apiKeys, {
+        onToken: (t) => setCompareResult((prev) => prev + t),
+        onDone: () => setIsCompareLoading(false),
+        onError: (err) => {
+          showToast(err);
+          setIsCompareLoading(false);
+        },
+      });
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Comparison failed");
+      setIsCompareLoading(false);
+    }
+  };
+
+  const handleIngestUrl = async (url: string) => {
+    setIsUrlLoading(true);
+    try {
+      let targetSession = activeSession;
+      if (!targetSession) {
+        const domain = url.split("//")[1]?.split("/")[0] || "Web Article";
+        const newId = await createSession(`Web: ${domain}`);
+        const updatedList = await listSessions();
+        setSessions(updatedList);
+        targetSession = updatedList.find((s) => s.id === newId) || null;
+        if (targetSession) setActiveSession(targetSession);
+      }
+
+      if (!targetSession) throw new Error("Could not initialize conversation session");
+
+      const doc = await ingestUrl(targetSession.id, url);
+      const updatedDocs = [...(targetSession.documents || []), doc];
+      const updatedSession = { ...targetSession, documents: updatedDocs };
+      setActiveSession(updatedSession);
+      setSessions((prev) =>
+        prev.map((s) => (s.id === targetSession!.id ? updatedSession : s))
+      );
+      showToast(`Ingested and indexed "${doc.filename}"`);
+      setIsUrlModalOpen(false);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "URL ingestion failed");
+      throw err;
+    } finally {
+      setIsUrlLoading(false);
+    }
+  };
+
+  const handleExportChat = (formatType: "markdown" | "json" | "print" = "markdown") => {
+    if (!activeSession || messages.length === 0) return;
+    if (formatType === "print") {
+      window.print();
+      return;
+    }
+
+    let textContent = "";
+    let mimeType = "text/plain";
+    let extension = "txt";
+
+    if (formatType === "markdown") {
+      mimeType = "text/markdown; charset=utf-8";
+      extension = "md";
+      const lines: string[] = [];
+      lines.push(`# ${activeSession.title}`);
+      lines.push(`*Exported from DocMind AI — ${new Date().toLocaleString()}*`);
+      lines.push("");
+      if (activeSession.documents && activeSession.documents.length > 0) {
+        lines.push(`## Attached Documents`);
+        activeSession.documents.forEach((d) => lines.push(`- ${d.filename} (${d.chunk_count} chunks)`));
+        lines.push("");
+      }
+      lines.push(`## Conversation`);
+      lines.push("");
+      messages.forEach((msg) => {
+        const role = msg.role === "user" ? "**You**" : "**DocMind AI**";
+        const time = (() => {
+          try { return new Date(msg.created_at).toLocaleTimeString(); } catch { return ""; }
+        })();
+        lines.push(`### ${role}${time ? ` — ${time}` : ""}`);
+        lines.push("");
+        lines.push(msg.content);
+        lines.push("");
+      });
+      textContent = lines.join("\n");
+    } else if (formatType === "json") {
+      mimeType = "application/json";
+      extension = "json";
+      textContent = JSON.stringify({ session: activeSession, messages }, null, 2);
+    }
+
+    const blob = new Blob([textContent], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `DocMind_Export_${activeSession.title.replace(/[^a-z0-9]/gi, "_").toLowerCase()}_${Date.now()}.${extension}`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast(`Session exported as .${extension}`);
+  };
+
+  const handleOpenCitation = (docId?: string, pageNum?: number) => {
+    if (!activeSession) return;
+    const doc = activeSession.documents.find((d) => d.doc_id === docId) || activeSession.documents[0];
+    if (doc) {
+      setViewerDoc(doc);
+      setViewerPage(pageNum || 1);
+      setIsViewerOpen(true);
+    }
+  };
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
@@ -458,42 +639,6 @@ export default function HomePage() {
     }
   };
 
-  // ── Export Chat as Markdown ─────────────────────────────────────────────────
-  const handleExportChat = () => {
-    if (!activeSession || messages.length === 0) return;
-    const lines: string[] = [];
-    lines.push(`# ${activeSession.title}`);
-    lines.push(`*Exported from DocMind AI — ${new Date().toLocaleString()}*`);
-    lines.push("");
-    if (currentDocs.length > 0) {
-      lines.push(`## Attached Documents`);
-      currentDocs.forEach((d) => lines.push(`- ${d.filename} (${d.chunk_count} chunks)`));
-      lines.push("");
-    }
-    lines.push(`## Conversation`);
-    lines.push("");
-    messages.forEach((msg) => {
-      const role = msg.role === "user" ? "**You**" : "**DocMind AI**";
-      const time = (() => {
-        try { return new Date(msg.created_at).toLocaleTimeString(); } catch { return ""; }
-      })();
-      lines.push(`### ${role} — ${time}`);
-      lines.push("");
-      lines.push(msg.content);
-      lines.push("");
-    });
-    const blob = new Blob([lines.join("\n")], { type: "text/markdown; charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `docmind-${activeSession.title.replace(/[^a-z0-9]/gi, "_").toLowerCase()}-${Date.now()}.md`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    showToast("Chat exported as Markdown");
-  };
-
   // ── Session Title Editing ───────────────────────────────────────────────────
   const handleStartTitleEdit = () => {
     if (!activeSession) return;
@@ -754,9 +899,21 @@ export default function HomePage() {
               setMessages([]);
             }
           }}
+          onSessionRenamed={(id, newTitle) => {
+            setSessions((prev) =>
+              prev.map((s) => (s.id === id ? { ...s, title: newTitle } : s))
+            );
+            if (activeSession?.id === id) {
+              setActiveSession((prev) => (prev ? { ...prev, title: newTitle } : prev));
+            }
+          }}
           onAllSessionsDeleted={handleAllSessionsDeleted}
           onOpenSettings={() => setModal("settings")}
           onOpenShortcuts={() => setModal("shortcuts")}
+          onOpenCompare={() => setIsCompareOpen(true)}
+          onOpenQuiz={handleOpenQuiz}
+          onOpenMemoryInspector={() => setModal("memory")}
+          onOpenUrlIngest={() => setIsUrlModalOpen(true)}
           onCloseSidebar={() => {
             setIsSidebarOpen(false);
             saveSidebarState(false);
@@ -854,7 +1011,7 @@ export default function HomePage() {
               {hasSession && messages.length > 0 && (
                 <motion.button
                   className="topbar-action-btn hide-on-tablet"
-                  onClick={handleExportChat}
+                  onClick={() => handleExportChat("markdown")}
                   whileHover={{ scale: 1.04 }}
                   whileTap={{ scale: 0.95 }}
                   title="Export conversation as Markdown"
@@ -920,9 +1077,9 @@ export default function HomePage() {
                       Active Chat Context:
                     </span>
                     <AnimatePresence>
-                      {currentDocs.map((d) => (
+                      {currentDocs.map((d, dIdx) => (
                         <motion.div
-                          key={d.doc_id}
+                          key={d.doc_id || `doc-chip-${dIdx}-${d.filename}`}
                           layout
                           initial={{ scale: 0.8, opacity: 0 }}
                           animate={{ scale: 1, opacity: 1 }}
@@ -1259,6 +1416,60 @@ export default function HomePage() {
         {modal === "shortcuts" && (
           <KeyboardShortcutsModal
             onClose={() => setModal("none")}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Upgrade Feature Modals with AnimatePresence */}
+      <AnimatePresence>
+        {isQuizOpen && (
+          <QuizModal
+            isOpen={isQuizOpen}
+            onClose={() => setIsQuizOpen(false)}
+            activeSession={activeSession}
+            sessions={sessions}
+            onSelectSession={handleSelectSession}
+            onOpenUpload={() => setModal("upload")}
+            onGenerateQuiz={handleGenerateQuiz}
+            questions={quizQuestions}
+            isLoading={isQuizLoading}
+          />
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {isCompareOpen && (
+          <CompareModal
+            isOpen={isCompareOpen}
+            onClose={() => setIsCompareOpen(false)}
+            activeSession={activeSession}
+            sessions={sessions}
+            onOpenUpload={() => setModal("upload")}
+            onStartComparison={handleStartComparison}
+            isLoading={isCompareLoading}
+            resultMarkdown={compareResult}
+          />
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {isViewerOpen && (
+          <DocumentViewerModal
+            isOpen={isViewerOpen}
+            onClose={() => setIsViewerOpen(false)}
+            document={viewerDoc}
+            pageNumber={viewerPage}
+          />
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {isUrlModalOpen && (
+          <UrlIngestModal
+            isOpen={isUrlModalOpen}
+            onClose={() => setIsUrlModalOpen(false)}
+            onIngest={handleIngestUrl}
+            isLoading={isUrlLoading}
           />
         )}
       </AnimatePresence>

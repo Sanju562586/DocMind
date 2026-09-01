@@ -140,6 +140,10 @@ class HierarchicalSemanticChunker:
             parent_id = str(uuid.uuid4())
             child_texts = self._semantic_split(parent_text)
 
+            # Extract page number marker if present in parent section
+            page_match = re.search(r"---\s*\[Page\s+(\d+)\]\s*---", parent_text)
+            page_num = int(page_match.group(1)) if page_match else None
+
             for child_text in child_texts:
                 if not child_text.strip():
                     continue
@@ -164,6 +168,7 @@ class HierarchicalSemanticChunker:
                         "section": section_header,
                         "parent_index": parent_idx,
                         "session_id": session_id,
+                        "page_number": page_num,
                     },
                 )
                 all_chunks.append(chunk)

@@ -128,43 +128,46 @@ def test_retriever_safe_persistence(session1_id: str, chunks, all_mems):
 
 def test_fastapi_endpoints():
     print("\n4. Testing FastAPI Endpoints via TestClient...")
-    client = TestClient(app)
+    with TestClient(app) as client:
+        # Health endpoints
+        r_health = client.get("/api/health")
+        assert r_health.status_code == 200
+        assert r_health.json()["status"] == "healthy"
 
-    # Health endpoints
-    r_health = client.get("/api/health")
-    assert r_health.status_code == 200
-    assert r_health.json()["status"] == "healthy"
+        r_live = client.get("/api/health/live")
+        assert r_live.status_code == 200
+        assert r_live.json()["status"] == "alive"
 
-    r_live = client.get("/api/health/live")
-    assert r_live.status_code == 200
-    assert r_live.json()["status"] == "alive"
+        r_ready = client.get("/api/health/ready")
+        assert r_ready.status_code == 200
+        assert r_ready.json()["status"] == "ready"
+        print("   [OK] Health, Liveness, and Readiness endpoints verified.")
 
-    r_ready = client.get("/api/health/ready")
-    assert r_ready.status_code == 200
-    assert r_ready.json()["status"] == "ready"
-    print("   [OK] Health, Liveness, and Readiness endpoints verified.")
+        # Session CRUD
+        r_create = client.post("/api/sessions", json={"title": "Integration Test Session"})
+        assert r_create.status_code == 200
+        sess_id = r_create.json()["session_id"]
 
-    # Session CRUD
-    r_create = client.post("/api/sessions", json={"title": "Integration Test Session"})
-    assert r_create.status_code == 200
-    sess_id = r_create.json()["session_id"]
+        r_get = client.get(f"/api/sessions/{sess_id}")
+        assert r_get.status_code == 200
+        assert r_get.json()["title"] == "Integration Test Session"
 
-    r_get = client.get(f"/api/sessions/{sess_id}")
-    assert r_get.status_code == 200
-    assert r_get.json()["title"] == "Integration Test Session"
+        r_patch = client.patch(f"/api/sessions/{sess_id}/title", json={"title": "Renamed Session"})
+        assert r_patch.status_code == 200
+        assert r_patch.json()["title"] == "Renamed Session"
 
-    r_patch = client.patch(f"/api/sessions/{sess_id}/title", json={"title": "Renamed Session"})
-    assert r_patch.status_code == 200
-    assert r_patch.json()["title"] == "Renamed Session"
+        # Validation: empty message rejected
+        r_bad_chat = client.post("/api/chat", json={"session_id": sess_id, "message": "   "})
+        assert r_bad_chat.status_code == 422 or r_bad_chat.status_code == 400
 
-    # Validation: empty message rejected
-    r_bad_chat = client.post("/api/chat", json={"session_id": sess_id, "message": "   "})
-    assert r_bad_chat.status_code == 422 or r_bad_chat.status_code == 400
+        # LLMRouter generate_complete method verification
+        router = LLMRouter()
+        assert hasattr(router, "generate_complete"), "LLMRouter must provide generate_complete method"
 
-    # Delete session
-    r_del = client.delete(f"/api/sessions/{sess_id}")
-    assert r_del.status_code == 200
-    print("   [OK] FastAPI Endpoints & Validation verified.")
+        # Delete session
+        r_del = client.delete(f"/api/sessions/{sess_id}")
+        assert r_del.status_code == 200
+        print("   [OK] Session CRUD, LLMRouter methods, and validation rules verified.")
 
 
 def test_all():
@@ -182,7 +185,7 @@ def test_all():
                 pass
 
     print("\n==================================================")
-    print("🌟 ALL PRODUCTION BACKEND COMPONENT TESTS PASSED! 🌟")
+    print("*** ALL PRODUCTION BACKEND COMPONENT TESTS PASSED! ***")
     print("==================================================")
 
 

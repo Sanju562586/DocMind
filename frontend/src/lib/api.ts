@@ -65,18 +65,18 @@ export function parseErrorMessage(err: unknown, fallback: string): string {
 /**
  * Fetch with automatic exponential backoff retry for transient network and 503 errors.
  */
-async function fetchWithRetry(url: string, options?: RequestInit, retries = 2, delayMs = 500): Promise<Response> {
+async function fetchWithRetry(url: string, options?: RequestInit, retries = 2, delayMs = 300): Promise<Response> {
   try {
     const res = await fetch(url, options);
     if ((res.status === 503 || res.status === 502) && retries > 0) {
       await new Promise((resolve) => setTimeout(resolve, delayMs));
-      return fetchWithRetry(url, options, retries - 1, delayMs * 2);
+      return fetchWithRetry(url, options, retries - 1, delayMs * 1.5);
     }
     return res;
   } catch (err) {
     if (retries > 0) {
       await new Promise((resolve) => setTimeout(resolve, delayMs));
-      return fetchWithRetry(url, options, retries - 1, delayMs * 2);
+      return fetchWithRetry(url, options, retries - 1, delayMs * 1.5);
     }
     throw err;
   }
@@ -116,7 +116,7 @@ export async function checkBackendHealth(): Promise<{
   service: string;
 }> {
   try {
-    const res = await fetch(`${API_BASE}/health`, { cache: "no-store" });
+    const res = await fetchWithRetry(`${API_BASE}/health`, { cache: "no-store" });
     return await handleResponse(res, "Backend is unreachable. Please verify the backend server is running.");
   } catch (err) {
     throw new Error(parseErrorMessage(err, "Backend is unreachable. Please verify the backend server is running."));
@@ -127,7 +127,7 @@ export async function checkBackendHealth(): Promise<{
 
 export async function createSession(title: string = "New Conversation"): Promise<string> {
   try {
-    const res = await fetch(`${API_BASE}/sessions`, {
+    const res = await fetchWithRetry(`${API_BASE}/sessions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title }),
@@ -141,7 +141,7 @@ export async function createSession(title: string = "New Conversation"): Promise
 
 export async function listSessions(): Promise<Session[]> {
   try {
-    const res = await fetch(`${API_BASE}/sessions`, { cache: "no-store" });
+    const res = await fetchWithRetry(`${API_BASE}/sessions`, { cache: "no-store" });
     return await handleResponse<Session[]>(res, "Failed to fetch sessions");
   } catch (err) {
     throw new Error(parseErrorMessage(err, "Failed to fetch sessions"));
@@ -150,7 +150,7 @@ export async function listSessions(): Promise<Session[]> {
 
 export async function getSession(sessionId: string): Promise<Session> {
   try {
-    const res = await fetch(`${API_BASE}/sessions/${sessionId}`);
+    const res = await fetchWithRetry(`${API_BASE}/sessions/${sessionId}`);
     return await handleResponse<Session>(res, "Failed to fetch session");
   } catch (err) {
     throw new Error(parseErrorMessage(err, "Failed to fetch session"));
@@ -159,7 +159,7 @@ export async function getSession(sessionId: string): Promise<Session> {
 
 export async function deleteSession(sessionId: string): Promise<void> {
   try {
-    const res = await fetch(`${API_BASE}/sessions/${sessionId}`, { method: "DELETE" });
+    const res = await fetchWithRetry(`${API_BASE}/sessions/${sessionId}`, { method: "DELETE" });
     await handleResponse<{ status: string }>(res, "Failed to delete session");
   } catch (err) {
     throw new Error(parseErrorMessage(err, "Failed to delete session"));
@@ -167,7 +167,7 @@ export async function deleteSession(sessionId: string): Promise<void> {
 }
 export async function getMessages(sessionId: string): Promise<Message[]> {
   try {
-    const res = await fetch(`${API_BASE}/sessions/${sessionId}/messages`);
+    const res = await fetchWithRetry(`${API_BASE}/sessions/${sessionId}/messages`);
     return await handleResponse<Message[]>(res, "Failed to fetch messages");
   } catch (err) {
     throw new Error(parseErrorMessage(err, "Failed to fetch messages"));
@@ -177,7 +177,7 @@ export async function getMessages(sessionId: string): Promise<Message[]> {
 
 export async function getStats(): Promise<SystemStats> {
   try {
-    const res = await fetch(`${API_BASE}/stats`, { cache: "no-store" });
+    const res = await fetchWithRetry(`${API_BASE}/stats`, { cache: "no-store" });
     return await handleResponse<SystemStats>(res, "Failed to fetch platform stats");
   } catch (err) {
     throw new Error(parseErrorMessage(err, "Failed to fetch platform stats"));
@@ -186,7 +186,7 @@ export async function getStats(): Promise<SystemStats> {
 
 export async function renameSession(sessionId: string, title: string): Promise<string> {
   try {
-    const res = await fetch(`${API_BASE}/sessions/${sessionId}/title`, {
+    const res = await fetchWithRetry(`${API_BASE}/sessions/${sessionId}/title`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title }),
@@ -200,7 +200,7 @@ export async function renameSession(sessionId: string, title: string): Promise<s
 
 export async function deleteAllSessions(): Promise<void> {
   try {
-    const res = await fetch(`${API_BASE}/sessions`, { method: "DELETE" });
+    const res = await fetchWithRetry(`${API_BASE}/sessions`, { method: "DELETE" });
     await handleResponse<{ status: string }>(res, "Failed to delete all sessions");
   } catch (err) {
     throw new Error(parseErrorMessage(err, "Failed to delete all sessions"));
@@ -209,7 +209,7 @@ export async function deleteAllSessions(): Promise<void> {
 
 export async function listAllMemories(): Promise<MemoryItem[]> {
   try {
-    const res = await fetch(`${API_BASE}/memory`, { cache: "no-store" });
+    const res = await fetchWithRetry(`${API_BASE}/memory`, { cache: "no-store" });
     return await handleResponse<MemoryItem[]>(res, "Failed to fetch global memories");
   } catch (err) {
     throw new Error(parseErrorMessage(err, "Failed to fetch global memories"));
@@ -218,7 +218,7 @@ export async function listAllMemories(): Promise<MemoryItem[]> {
 
 export async function deleteMemoryItem(memoryId: string): Promise<void> {
   try {
-    const res = await fetch(`${API_BASE}/memory/${memoryId}`, { method: "DELETE" });
+    const res = await fetchWithRetry(`${API_BASE}/memory/${memoryId}`, { method: "DELETE" });
     await handleResponse<{ status: string; memory_id: string }>(res, "Failed to delete memory item");
   } catch (err) {
     throw new Error(parseErrorMessage(err, "Failed to delete memory item"));
@@ -227,7 +227,7 @@ export async function deleteMemoryItem(memoryId: string): Promise<void> {
 
 export async function clearAllMemories(): Promise<void> {
   try {
-    const res = await fetch(`${API_BASE}/memory`, { method: "DELETE" });
+    const res = await fetchWithRetry(`${API_BASE}/memory`, { method: "DELETE" });
     await handleResponse<{ status: string }>(res, "Failed to clear global memories");
   } catch (err) {
     throw new Error(parseErrorMessage(err, "Failed to clear global memories"));
@@ -250,7 +250,7 @@ export async function uploadDocumentToSession(
     if (keys.groq) headers["X-Groq-Key"] = keys.groq;
     if (keys.openrouter) headers["X-OpenRouter-Key"] = keys.openrouter;
 
-    const res = await fetch(`${API_BASE}/sessions/${sessionId}/documents`, {
+    const res = await fetchWithRetry(`${API_BASE}/sessions/${sessionId}/documents`, {
       method: "POST",
       headers,
       body: formData,
@@ -264,7 +264,7 @@ export async function uploadDocumentToSession(
 
 export async function listSessionDocuments(sessionId: string): Promise<Document[]> {
   try {
-    const res = await fetch(`${API_BASE}/sessions/${sessionId}/documents`);
+    const res = await fetchWithRetry(`${API_BASE}/sessions/${sessionId}/documents`);
     return await handleResponse<Document[]>(res, "Failed to fetch session documents");
   } catch (err) {
     throw new Error(parseErrorMessage(err, "Failed to fetch session documents"));
@@ -273,7 +273,7 @@ export async function listSessionDocuments(sessionId: string): Promise<Document[
 
 export async function deleteDocument(docId: string): Promise<void> {
   try {
-    const res = await fetch(`${API_BASE}/documents/${docId}`, { method: "DELETE" });
+    const res = await fetchWithRetry(`${API_BASE}/documents/${docId}`, { method: "DELETE" });
     await handleResponse<{ status: string; session_id: string }>(res, "Failed to delete document");
   } catch (err) {
     throw new Error(parseErrorMessage(err, "Failed to delete document"));
@@ -420,3 +420,120 @@ export async function summarizeSession(
     );
   }
 }
+
+// ── Ingest URL ─────────────────────────────────────────────────────────────
+
+export async function ingestUrl(sessionId: string, url: string): Promise<Document> {
+  try {
+    const res = await fetch(`${API_BASE}/sessions/${sessionId}/url`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    return await handleResponse<Document>(res, "URL ingestion failed");
+  } catch (err) {
+    throw new Error(parseErrorMessage(err, "URL ingestion failed"));
+  }
+}
+
+// ── Compare Documents (Streaming) ─────────────────────────────────────────
+
+export async function compareDocuments(
+  sessionId: string,
+  docIds: string[],
+  focusTopic: string,
+  keys: Partial<ApiKeys>,
+  callbacks: ChatStreamCallbacks
+): Promise<void> {
+  try {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (keys.gemini) headers["X-Gemini-Key"] = keys.gemini;
+    if (keys.groq) headers["X-Groq-Key"] = keys.groq;
+    if (keys.openrouter) headers["X-OpenRouter-Key"] = keys.openrouter;
+
+    const res = await fetch(`${API_BASE}/sessions/${sessionId}/compare`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ doc_ids: docIds, focus_topic: focusTopic }),
+    });
+
+    if (!res.ok) {
+      let errBody: unknown;
+      try {
+        errBody = await res.json();
+      } catch {
+        errBody = res.statusText;
+      }
+      callbacks.onError(parseErrorMessage(errBody, `Comparison failed (${res.status})`));
+      return;
+    }
+
+    const reader = res.body?.getReader();
+    if (!reader) {
+      callbacks.onError("No stream available from server");
+      return;
+    }
+
+    const decoder = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        try {
+          const ev = JSON.parse(line.slice(6));
+          if (ev.type === "token") callbacks.onToken(ev.content);
+          else if (ev.type === "done") callbacks.onDone();
+          else if (ev.type === "error") callbacks.onError(ev.message || "Comparison error");
+        } catch {
+          // ignore
+        }
+      }
+    }
+  } catch (err) {
+    callbacks.onError(
+      parseErrorMessage(err, "Connection error: Unable to reach backend server. Please check network.")
+    );
+  }
+}
+
+// ── Interactive Quiz & Flashcards ──────────────────────────────────────────
+
+export interface QuizQuestion {
+  question: string;
+  options: string[];
+  correct_index: number;
+  explanation: string;
+}
+
+export async function generateQuiz(
+  sessionId: string,
+  keys: Partial<ApiKeys>,
+  numQuestions: number = 5
+): Promise<QuizQuestion[]> {
+  try {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (keys.gemini) headers["X-Gemini-Key"] = keys.gemini;
+    if (keys.groq) headers["X-Groq-Key"] = keys.groq;
+    if (keys.openrouter) headers["X-OpenRouter-Key"] = keys.openrouter;
+
+    const res = await fetch(`${API_BASE}/sessions/${sessionId}/quiz`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ num_questions: numQuestions }),
+    });
+
+    const data = await handleResponse<{ session_id: string; quiz: QuizQuestion[] }>(
+      res,
+      "Failed to generate quiz"
+    );
+    return data.quiz;
+  } catch (err) {
+    throw new Error(parseErrorMessage(err, "Failed to generate quiz"));
+  }
+}
+

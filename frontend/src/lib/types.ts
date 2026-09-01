@@ -7,6 +7,7 @@ export interface Document {
   chunk_count: number;
   char_count: number;
   word_count?: number;
+  page_count?: number;
   file_type?: string;
   status?: "processing" | "ready" | "error";
   message?: string;

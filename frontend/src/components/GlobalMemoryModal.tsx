@@ -196,9 +196,9 @@ export function GlobalMemoryModal({ sessions, onClose }: GlobalMemoryModalProps)
             </div>
           ) : (
             <AnimatePresence mode="popLayout">
-              {filteredMemories.map((mem) => (
+              {filteredMemories.map((mem, memIdx) => (
                 <motion.div
-                  key={mem.id || mem.content}
+                  key={mem.id || `mem-${memIdx}-${mem.session_id}-${mem.content?.slice(0, 16)}`}
                   layout
                   initial={{ opacity: 0, y: 6 }}
                   animate={{ opacity: 1, y: 0 }}
