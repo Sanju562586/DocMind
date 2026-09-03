@@ -48,11 +48,12 @@ function renderMarkdownToHtml(markdown: string): string {
   // Fix headings missing space after # symbols (e.g. `###Clarification` -> `### Clarification`)
   html = html.replace(/^(#{1,6})([^#\s\n][^\n]*)$/gm, "$1 $2");
 
-  // 1. Code blocks with language header and strict monospace alignment
+  // 1. Stash Code Blocks FIRST into isolated placeholders to protect from list regexes & paragraph splitting
+  const codeBlocks: string[] = [];
   html = html.replace(/```(\w*)\r?\n([\s\S]*?)```/g, (_, lang, code) => {
     const cleanLang = lang.trim() || "CODE";
     const cleanCode = escapeHtml(code);
-    return `
+    const rendered = `
       <div class="code-block-wrapper" style="margin: 6px 0; background: #060608; border: 1px solid rgba(255, 255, 255, 0.18); border-radius: 5px; overflow: hidden; page-break-inside: avoid; break-inside: avoid;">
         <div style="display: flex; align-items: center; justify-content: space-between; padding: 3px 8px; background: rgba(255, 255, 255, 0.05); border-bottom: 1px solid rgba(255, 255, 255, 0.08); font-family: 'JetBrains Mono', monospace, Courier; font-size: 9px; color: #888888; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">
           <span>${escapeHtml(cleanLang)}</span>
@@ -60,22 +61,32 @@ function renderMarkdownToHtml(markdown: string): string {
         <pre style="margin: 0; padding: 6px 10px; font-family: 'JetBrains Mono', 'Courier New', Courier, monospace; font-size: 10.5px; line-height: 1.4; color: #FFFFFF; overflow-x: auto; white-space: pre; letter-spacing: 0px; tab-size: 2;"><code>${cleanCode}</code></pre>
       </div>
     `;
+    const placeholder = `___DOCMIND_CODE_BLOCK_${codeBlocks.length}___`;
+    codeBlocks.push(rendered);
+    return placeholder;
   });
 
-  // 2. Math display blocks ($$ ... $$ or \[ ... \])
+  // 2. Stash Math display blocks ($$ ... $$ or \[ ... \]) into isolated placeholders
+  const mathBlocks: string[] = [];
   html = html.replace(/\$\$([\s\S]*?)\$\$/g, (_, math) => {
-    return `
+    const rendered = `
       <div class="katex-display-box" style="margin: 6px 0; padding: 6px 10px; background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 4px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #FFFFFF; text-align: center; page-break-inside: avoid; break-inside: avoid;">
         ${escapeHtml(math.trim())}
       </div>
     `;
+    const placeholder = `___DOCMIND_MATH_BLOCK_${mathBlocks.length}___`;
+    mathBlocks.push(rendered);
+    return placeholder;
   });
   html = html.replace(/\\\[([\s\S]*?)\\\]/g, (_, math) => {
-    return `
+    const rendered = `
       <div class="katex-display-box" style="margin: 6px 0; padding: 6px 10px; background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 4px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #FFFFFF; text-align: center; page-break-inside: avoid; break-inside: avoid;">
         ${escapeHtml(math.trim())}
       </div>
     `;
+    const placeholder = `___DOCMIND_MATH_BLOCK_${mathBlocks.length}___`;
+    mathBlocks.push(rendered);
+    return placeholder;
   });
 
   // 3. Tables (| a | b | ... |)
@@ -152,10 +163,12 @@ function renderMarkdownToHtml(markdown: string): string {
 
   // 9. Bullet Points & Lists
   html = html.replace(/^\s*[\-\*]\s+(.*$)/gim, '<li style="margin-bottom: 3px; color: #E5E5E5;">$1</li>');
-  html = html.replace(/(<li style="margin-bottom: 3px; color: #E5E5E5;">.*<\/li>\s*)+/g, '<ul style="margin: 3px 0 6px 18px; padding-left: 2px;">$&</ul>');
 
   // 10. Numbered Lists
   html = html.replace(/^\s*\d+\.\s+(.*$)/gim, '<li style="margin-bottom: 3px; color: #E5E5E5;">$1</li>');
+
+  // Wrap consecutive list items
+  html = html.replace(/(<li style="margin-bottom: 3px; color: #E5E5E5;">.*<\/li>\s*)+/g, '<ul style="margin: 3px 0 6px 18px; padding-left: 2px;">$&</ul>');
 
   // 11. Paragraphs (compact 4px bottom margin)
   const paragraphs = html.split(/\n\n+/);
@@ -170,13 +183,25 @@ function renderMarkdownToHtml(markdown: string): string {
         trimmed.startsWith("<ul") ||
         trimmed.startsWith("<ol") ||
         trimmed.startsWith("<blockquote") ||
-        trimmed.startsWith("<hr")
+        trimmed.startsWith("<hr") ||
+        trimmed.startsWith("___DOCMIND_CODE_BLOCK_") ||
+        trimmed.startsWith("___DOCMIND_MATH_BLOCK_")
       ) {
         return trimmed;
       }
       return `<p style="margin-bottom: 4px; line-height: 1.48; color: #E5E5E5;">${trimmed.replace(/\n/g, "<br/>")}</p>`;
     })
     .join("");
+
+  // Restore Math Blocks
+  mathBlocks.forEach((rendered, i) => {
+    html = html.replace(`___DOCMIND_MATH_BLOCK_${i}___`, rendered);
+  });
+
+  // Restore Code Blocks
+  codeBlocks.forEach((rendered, i) => {
+    html = html.replace(`___DOCMIND_CODE_BLOCK_${i}___`, rendered);
+  });
 
   return html;
 }

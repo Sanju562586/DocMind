@@ -295,50 +295,6 @@ export default function Sidebar({
           <span>New Conversation</span>
         </motion.button>
 
-        {/* Quick Action Tools */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginTop: 8 }}>
-          {onOpenQuiz && (
-            <button
-              onClick={onOpenQuiz}
-              className="btn btn-outline"
-              style={{ padding: "6px 8px", fontSize: 11, justifyContent: "center" }}
-              title="Generate Interactive Quiz"
-            >
-              💡 Quiz
-            </button>
-          )}
-          {onOpenCompare && (
-            <button
-              onClick={onOpenCompare}
-              className="btn btn-outline"
-              style={{ padding: "6px 8px", fontSize: 11, justifyContent: "center" }}
-              title="Compare Session Documents"
-            >
-              ⚖️ Compare
-            </button>
-          )}
-          {onOpenMemoryInspector && (
-            <button
-              onClick={onOpenMemoryInspector}
-              className="btn btn-outline"
-              style={{ padding: "6px 8px", fontSize: 11, justifyContent: "center" }}
-              title="Cross-Session Memory Inspector"
-            >
-              🧠 Memory
-            </button>
-          )}
-          {onOpenUrlIngest && (
-            <button
-              onClick={onOpenUrlIngest}
-              className="btn btn-outline"
-              style={{ padding: "6px 8px", fontSize: 11, justifyContent: "center" }}
-              title="Ingest Web Page URL"
-            >
-              🌐 Add URL
-            </button>
-          )}
-        </div>
-
         {/* Live Search Input */}
         {sessions.length > 2 && (
           <div className="sidebar-search-wrapper">
@@ -504,18 +460,6 @@ export default function Sidebar({
                           {s.title || "Untitled Conversation"}
                         </div>
                       )}
-                      <div className="sidebar-item-meta">
-                        {docCount > 0 ? (
-                          <span style={{ color: "#FFFFFF", display: "inline-flex", alignItems: "center", gap: 3 }}>
-                            <FileText size={10} />
-                            {docCount} {docCount === 1 ? "doc" : "docs"}
-                          </span>
-                        ) : (
-                          <span>No docs</span>
-                        )}
-                        <span>&bull;</span>
-                        <span>{s.message_count || 0} msgs</span>
-                      </div>
                     </div>
                     <div className="sidebar-item-actions">
                       <motion.button
@@ -612,18 +556,6 @@ export default function Sidebar({
                           {s.title || "Untitled Conversation"}
                         </div>
                       )}
-                      <div className="sidebar-item-meta">
-                        {docCount > 0 ? (
-                          <span style={{ color: "#FFFFFF", display: "inline-flex", alignItems: "center", gap: 3 }}>
-                            <FileText size={10} />
-                            {docCount} {docCount === 1 ? "doc" : "docs"}
-                          </span>
-                        ) : (
-                          <span>No docs</span>
-                        )}
-                        <span>&bull;</span>
-                        <span>{s.message_count || 0} msgs</span>
-                      </div>
                     </div>
                     <div className="sidebar-item-actions">
                       <motion.button

@@ -25,6 +25,14 @@ export function preprocessMarkdown(content: string): string {
   // 1. Unescape HTML entities & normalize line endings to \n
   let processed = unescapeEntities(content).replace(/\r\n/g, "\n");
 
+  // Protect code blocks by stashing them into isolated placeholders
+  const codeBlocks: string[] = [];
+  processed = processed.replace(/```(\w*)\n([\s\S]*?)```/g, (match) => {
+    const placeholder = `___DOCMIND_CODE_BLOCK_${codeBlocks.length}___`;
+    codeBlocks.push(match);
+    return placeholder;
+  });
+
   // 2. Normalize literal unicode bullet symbols (•, ▪, ‣, ⁃) to standard Markdown bullet `- `
   processed = processed.replace(/^[ \t]*[•▪‣⁃][ \t]*/gm, "- ");
 
@@ -74,22 +82,23 @@ export function preprocessMarkdown(content: string): string {
   processed = processed.replace(/([^\n])\n*(#{1,6})(?=\s+[^\n]+|[^\s#\n][^\n]*)/g, "$1\n\n$2");
   processed = processed.replace(/^(#{1,6})([^#\s\n][^\n]*)$/gm, "$1 $2");
 
-  // 11. Fix code blocks glued to text
-  processed = processed.replace(/([^\n`])```/g, "$1\n\n```");
-  processed = processed.replace(/```([^\n`]+)\n([\s\S]*?)```([^\n`])/g, "```$1\n$2```\n\n$3");
-
-  // 12. Fix list items glued to paragraph text without a blank line
+  // 11. Fix list items glued to paragraph text without a blank line
   processed = processed.replace(/([^\n\s])\n([\-\*]|\d+\.)\s+/g, "$1\n\n$2 ");
 
-  // 13. LaTeX math conversions & syntax cleanup
+  // 12. LaTeX math conversions & syntax cleanup
   processed = processed.replace(/\\\[([\s\S]*?)\\\]/g, (_, math) => `\n\n$$\n${math.trim()}\n$$\n\n`);
   processed = processed.replace(/\\\(([\s\S]*?)\\\)/g, (_, math) => `$${math.trim()}$`);
   processed = processed.replace(/(?<=^|[\s(])\$(?!\$)([^$\n]+?)\$\$(?=[\s.,!?;:)\]]|$)/gm, "$$$1$$");
   processed = processed.replace(/(?<=^|[\s(])\$\$(?!\$)([^$\n]+?)\$(?=[\s.,!?;:)\]]|$)/gm, "$$$1$$");
   processed = processed.replace(/^[ \t]*\$\$([^\n$]+?)\$\$[ \t]*$/gm, (_, math) => `\n$$\n${math.trim()}\n$$\n`);
 
-  // 14. Collapse 3+ consecutive newlines into 2 newlines
+  // 13. Collapse 3+ consecutive newlines into 2 newlines
   processed = processed.replace(/\n{3,}/g, "\n\n");
+
+  // Restore Code Blocks
+  codeBlocks.forEach((block, i) => {
+    processed = processed.replace(`___DOCMIND_CODE_BLOCK_${i}___`, block);
+  });
 
   return processed.trim();
 }

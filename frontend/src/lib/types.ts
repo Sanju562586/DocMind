@@ -53,6 +53,8 @@ export interface Source {
   rerank_score: number;
   bm25_score: number;
   dense_score: number;
+  score?: number;
+  snippet?: string;
 }
 
 export interface Message {

@@ -91,6 +91,9 @@ function CodeBlock({ children, className }: { children: React.ReactNode; classNa
 // ── Interactive Source Card Component with Monochromatic Depth ────────────────
 
 function SourceCard({ source, index }: { source: Source; index: number }) {
+  const matchScore = source.score !== undefined ? source.score : source.rerank_score;
+  const textSnippet = source.snippet || source.child_text || "";
+
   return (
     <TiltCard maxTilt={6} scale={1.015} className="source-tilt-wrapper">
       <div className="source-card">
@@ -100,13 +103,13 @@ function SourceCard({ source, index }: { source: Source; index: number }) {
             <span>{source.title || "Document"}</span>
             {source.section && <span style={{ opacity: 0.6 }}>• {source.section}</span>}
           </div>
-          {source.score && (
+          {matchScore !== undefined && matchScore > 0 && (
             <span className="source-score-badge">
-              {(source.score * 100).toFixed(0)}% Match
+              {(matchScore * (matchScore <= 1 ? 100 : 1)).toFixed(0)}% Match
             </span>
           )}
         </div>
-        <p className="source-snippet">"{source.snippet}"</p>
+        {textSnippet && <p className="source-snippet">"{textSnippet}"</p>}
       </div>
     </TiltCard>
   );
@@ -116,6 +119,7 @@ function SourceCard({ source, index }: { source: Source; index: number }) {
 
 function InlineCitationChip({ source, index }: { source: Source; index: number }) {
   const [isOpen, setIsOpen] = useState(false);
+  const textSnippet = source.snippet || source.child_text || "";
 
   return (
     <div style={{ position: "relative", display: "inline-block" }}>
@@ -167,11 +171,13 @@ function InlineCitationChip({ source, index }: { source: Source; index: number }
           }}
         >
           <div style={{ fontWeight: 700, color: "#FFFFFF", marginBottom: 4 }}>
-            {source.title}
+            {source.title || "Extracted Source"}
           </div>
-          <div style={{ fontSize: 10.5, color: "#AAAAAA", lineHeight: 1.45 }}>
-            "{source.snippet}"
-          </div>
+          {textSnippet && (
+            <div style={{ fontSize: 10.5, color: "#AAAAAA", lineHeight: 1.45 }}>
+              "{textSnippet}"
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -183,9 +189,11 @@ function InlineCitationChip({ source, index }: { source: Source; index: number }
 export interface MessageBubbleProps {
   message: Message;
   isLatest?: boolean;
+  onOpenCitation?: (docId?: string, pageNum?: number) => void;
+  onSelectFollowUp?: (q: string) => void;
 }
 
-export function MessageBubble({ message, isLatest }: MessageBubbleProps) {
+export function MessageBubble({ message, isLatest, onOpenCitation, onSelectFollowUp }: MessageBubbleProps) {
   const isUser = message.role === "user";
   const timeStr = useMemo(() => {
     try {

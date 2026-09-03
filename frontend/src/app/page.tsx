@@ -1343,7 +1343,7 @@ export default function HomePage() {
                         message={msg}
                         isLatest={idx === messages.length - 1}
                         onOpenCitation={handleOpenCitation}
-                        onSelectFollowUp={(q) => handleSend(q)}
+                        onSelectFollowUp={(q: string) => handleSend(q)}
                       />
                     ))}
                   </AnimatePresence>
@@ -1360,23 +1360,13 @@ export default function HomePage() {
                   <AnimatePresence>
                     {error && (
                       <motion.div
-                        initial={{ opacity: 0, y: 10, scale: 0.95 }}
-                        animate={{ opacity: 1, y: 0, scale: 1 }}
-                        exit={{ opacity: 0, y: 10, scale: 0.95 }}
-                        transition={{ type: "spring", stiffness: 400, damping: 25 }}
-                        style={{
-                          padding: "12px 16px",
-                          background: "#111111",
-                          border: "1px solid rgba(255, 255, 255, 0.4)",
-                          borderRadius: "var(--radius-md)",
-                          color: "#FFFFFF",
-                          fontSize: 13,
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 10,
-                        }}
+                        className="error-banner"
+                        initial={{ opacity: 0, y: -6 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -6 }}
+                        style={{ marginTop: 12 }}
                       >
-                        <span>⚠️ {error}</span>
+                        <span>{error}</span>
                         <button
                           onClick={() => setError("")}
                           style={{ marginLeft: "auto", background: "none", border: "none", color: "#FFFFFF", cursor: "pointer", fontSize: 12 }}
@@ -1663,6 +1653,58 @@ export default function HomePage() {
             >
               ✕
             </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Full-Screen Drag & Drop Overlay */}
+      <AnimatePresence>
+        {isDraggingFile && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.98 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.98 }}
+            transition={{ type: "spring", stiffness: 400, damping: 25 }}
+            style={{
+              position: "fixed",
+              inset: 0,
+              zIndex: 9999,
+              background: "rgba(0, 0, 0, 0.88)",
+              backdropFilter: "blur(16px)",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 16,
+              border: "2px dashed rgba(255, 255, 255, 0.4)",
+              margin: 16,
+              borderRadius: 24,
+              pointerEvents: "none",
+            }}
+          >
+            <div
+              style={{
+                width: 64,
+                height: 64,
+                borderRadius: "50%",
+                background: "rgba(255, 255, 255, 0.1)",
+                border: "1px solid rgba(255, 255, 255, 0.3)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                boxShadow: "0 0 30px rgba(255, 255, 255, 0.2)",
+              }}
+            >
+              <Upload size={28} color="#FFFFFF" />
+            </div>
+            <div style={{ textAlign: "center" }}>
+              <h3 style={{ fontSize: 18, fontWeight: 700, color: "#FFFFFF", marginBottom: 4 }}>
+                Drop files to upload to DocMind
+              </h3>
+              <p style={{ fontSize: 12, color: "#A3A3A3" }}>
+                PDF, DOCX, TXT, CSV, or Markdown files will be processed and indexed automatically
+              </p>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
