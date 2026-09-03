@@ -6,6 +6,9 @@ import { motion } from "framer-motion";
 import { Document, Session } from "@/lib/types";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import { preprocessMarkdown } from "@/lib/markdown";
 
 interface CompareModalProps {
   isOpen: boolean;
@@ -242,9 +245,13 @@ export function CompareModal({
                   }}
                   className="message-bubble"
                 >
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                    {resultMarkdown}
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm, remarkMath]}
+                    rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false }]]}
+                  >
+                    {preprocessMarkdown(resultMarkdown)}
                   </ReactMarkdown>
+
                 </div>
               )}
             </div>

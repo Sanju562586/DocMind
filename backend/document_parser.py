@@ -348,7 +348,10 @@ class DocumentParser:
     @staticmethod
     def _clean_text(text: str) -> str:
         text = text.replace("\r\n", "\n").replace("\r", "\n")
+        # Normalize docx bullet symbols (e.g. \uf0b7, •, ▪, ‣) to standard '- '
+        text = re.sub(r"^[ \t]*[\uf0b7•▪‣⁃][ \t]*", "- ", text, flags=re.MULTILINE)
         text = re.sub(r"\n{3,}", "\n\n", text)
         text = text.replace("\x00", "")
         return text.strip()
+
 

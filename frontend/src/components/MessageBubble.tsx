@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -25,40 +25,8 @@ import { format, parseISO } from "date-fns";
 import TiltCard from "./TiltCard";
 import NeuralWaveform from "./NeuralWaveform";
 
-// ── LaTeX & Math Preprocessor ─────────────────────────────────────────────────
+import { preprocessMarkdown } from "@/lib/markdown";
 
-/**
- * Preprocesses markdown text to ensure LaTeX math syntax is parsed reliably by remark-math & KaTeX:
- * 1. Converts \[ ... \] into $$ ... $$ (display equations)
- * 2. Converts \( ... \) into $ ... $ (inline math)
- * 3. Normalizes mismatched single-line delimiters like `$ ... $$` or `$$ ... $`
- * 4. Fixes whitespace around inline dollar signs: `$ formula $` -> `$formula$`
- * 5. Formats single-line `$$...$$` blocks cleanly without ever spanning across lines or markdown headings
- */
-function preprocessLaTeX(content: string): string {
-  if (!content) return "";
-
-  let processed = content
-    // 1. Convert \[ ... \] display math to $$ ... $$
-    .replace(/\\\[([\s\S]*?)\\\]/g, (_, math) => `\n\n$$\n${math.trim()}\n$$\n\n`)
-    // 2. Convert \( ... \) inline math to $ ... $
-    .replace(/\\\(([\s\S]*?)\\\)/g, (_, math) => `$${math.trim()}$`);
-
-  // 3. Fix single-line mismatched $ ... $$ or $$ ... $ (e.g. $ w_{t+1} = w_t - v_{t+1} $$)
-  processed = processed.replace(/(?<=^|[\s(])\$(?!\$)([^$\n]+?)\$\$(?=[\s.,!?;:)\]]|$)/gm, "$$$1$$");
-  processed = processed.replace(/(?<=^|[\s(])\$\$(?!\$)([^$\n]+?)\$(?=[\s.,!?;:)\]]|$)/gm, "$$$1$$");
-
-  // 4. Normalize single-line display equations: `$$ formula $$` -> `\n$$\nformula\n$$\n`
-  // IMPORTANT: Match strictly within a single line ([^\n$]+?) so it NEVER spans across paragraphs or headings!
-  processed = processed.replace(/^[ \t]*\$\$([^\n$]+?)\$\$[ \t]*$/gm, (_, math) => `\n$$\n${math.trim()}\n$$\n`);
-
-  // 5. Fix spaces inside inline math delimiters: `$ formula $` -> `$formula$`
-  processed = processed.replace(/(?<=^|[\s(])\$ +([^$\n]+?) +\$(?=[\s.,!?;:)\]]|$)/gm, "$$$1$$");
-  processed = processed.replace(/(?<=^|[\s(])\$ +([^$\n]+?)\$(?=[\s.,!?;:)\]]|$)/gm, "$$$1$$");
-  processed = processed.replace(/(?<=^|[\s(])\$([^$\n]+?) +\$(?=[\s.,!?;:)\]]|$)/gm, "$$$1$$");
-
-  return processed;
-}
 
 // ── Copyable Code Block Component ─────────────────────────────────────────────
 
@@ -128,108 +96,119 @@ function SourceCard({ source, index }: { source: Source; index: number }) {
       <div className="source-card">
         <div className="source-card-header">
           <div className="source-section-badge">
-            <BookOpen size={12} color="#FFFFFF" />
-            <span>Chunk {index + 1}: {source.section || "Document Context"}</span>
+            <FileText size={11} color="#FFFFFF" />
+            <span>{source.title || "Document"}</span>
+            {source.section && <span style={{ opacity: 0.6 }}>• {source.section}</span>}
           </div>
-          <div className="source-scores-group">
-            <span
-              className="source-score-badge"
-              title={`Cross-Encoder Joint Reranker score: ${source.rerank_score.toFixed(3)}`}
-            >
-              <Cpu size={10} color="#FFFFFF" />
-              Rerank: {source.rerank_score.toFixed(3)}
+          {source.score && (
+            <span className="source-score-badge">
+              {(source.score * 100).toFixed(0)}% Match
             </span>
-            <span
-              className="source-score-badge"
-              title={`Dense Vector Semantic Similarity: ${source.dense_score.toFixed(3)}`}
-            >
-              <Search size={10} color="#FFFFFF" />
-              Dense: {source.dense_score.toFixed(3)}
-            </span>
-          </div>
+          )}
         </div>
-        <div className="source-text">{source.child_text}</div>
+        <p className="source-snippet">"{source.snippet}"</p>
       </div>
     </TiltCard>
   );
 }
 
-// ── Recalled Cross-Session Memory Card Component ──────────────────────────────
+// ── Inline Citation Chip Component ──────────────────────────────────────────
 
-function MemoryCard({ memory }: { memory: MemoryItem }) {
+function InlineCitationChip({ source, index }: { source: Source; index: number }) {
+  const [isOpen, setIsOpen] = useState(false);
+
   return (
-    <TiltCard maxTilt={5} scale={1.015} className="memory-tilt-wrapper">
-      <div className="memory-card">
-        <div className="memory-card-header">
-          <Database size={12} color="#FFFFFF" />
-          <span>Cross-Session Insight &bull; &ldquo;{memory.session_title}&rdquo;</span>
+    <div style={{ position: "relative", display: "inline-block" }}>
+      <button
+        onClick={() => setIsOpen(!isOpen)}
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 4,
+          padding: "2px 8px",
+          background: "rgba(255, 255, 255, 0.07)",
+          border: "1px solid rgba(255, 255, 255, 0.15)",
+          borderRadius: 4,
+          fontSize: 10,
+          color: "#D4D4D4",
+          cursor: "pointer",
+          transition: "all 0.15s ease",
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.borderColor = "rgba(255, 255, 255, 0.4)";
+          e.currentTarget.style.color = "#FFFFFF";
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.borderColor = "rgba(255, 255, 255, 0.15)";
+          e.currentTarget.style.color = "#D4D4D4";
+        }}
+      >
+        <BookOpen size={10} color="#FFFFFF" />
+        <span style={{ fontWeight: 600 }}>{source.title || `Source ${index + 1}`}</span>
+        {source.section && <span style={{ opacity: 0.6 }}>• {source.section}</span>}
+      </button>
+
+      {isOpen && (
+        <div
+          style={{
+            position: "absolute",
+            bottom: "100%",
+            left: 0,
+            marginBottom: 6,
+            width: 260,
+            padding: 10,
+            background: "#111111",
+            border: "1px solid rgba(255, 255, 255, 0.25)",
+            borderRadius: 8,
+            boxShadow: "0 10px 30px rgba(0,0,0,0.8)",
+            zIndex: 100,
+            fontSize: 11,
+            color: "#E5E5E5",
+          }}
+        >
+          <div style={{ fontWeight: 700, color: "#FFFFFF", marginBottom: 4 }}>
+            {source.title}
+          </div>
+          <div style={{ fontSize: 10.5, color: "#AAAAAA", lineHeight: 1.45 }}>
+            "{source.snippet}"
+          </div>
         </div>
-        <div className="memory-card-text">{memory.content}</div>
-      </div>
-    </TiltCard>
+      )}
+    </div>
   );
 }
 
-// ── Message Bubble Component ──────────────────────────────────────────────────
+// ── MessageBubble Main Component ─────────────────────────────────────────────
 
-import { Volume2, VolumeX } from "lucide-react";
-
-interface MessageBubbleProps {
+export interface MessageBubbleProps {
   message: Message;
-  onOpenCitation?: (docId?: string, pageNumber?: number) => void;
+  isLatest?: boolean;
 }
 
-export function MessageBubble({ message, onOpenCitation }: MessageBubbleProps) {
-  const [sourcesExpanded, setSourcesExpanded] = useState(false);
-  const [memoryExpanded, setMemoryExpanded] = useState(false);
-  const [copiedBubble, setCopiedBubble] = useState(false);
-  const [isSpeaking, setIsSpeaking] = useState(false);
+export function MessageBubble({ message, isLatest }: MessageBubbleProps) {
   const isUser = message.role === "user";
-
-  const handleTTS = () => {
-    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
-    if (isSpeaking) {
-      window.speechSynthesis.cancel();
-      setIsSpeaking(false);
-    } else {
-      window.speechSynthesis.cancel();
-      const utterance = new SpeechSynthesisUtterance(message.content);
-      utterance.onend = () => setIsSpeaking(false);
-      utterance.onerror = () => setIsSpeaking(false);
-      setIsSpeaking(true);
-      window.speechSynthesis.speak(utterance);
-    }
-  };
-
-  const timestamp = (() => {
+  const timeStr = useMemo(() => {
     try {
-      return format(parseISO(message.created_at), "h:mm a");
+      return format(new Date(message.created_at), "h:mm a");
     } catch {
       return "";
     }
-  })();
+  }, [message.created_at]);
 
   const hasSources = !isUser && message.sources && message.sources.length > 0;
-  const hasMemory = !isUser && message.memory_recalled && message.memory_recalled.length > 0;
-
-  const handleCopyMessage = () => {
-    navigator.clipboard.writeText(message.content);
-    setCopiedBubble(true);
-    setTimeout(() => setCopiedBubble(false), 2000);
-  };
 
   return (
     <motion.div
       className={`message ${isUser ? "user" : "assistant"}`}
-      initial={{ opacity: 0, y: 14, scale: 0.98 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      transition={{ type: "spring", stiffness: 350, damping: 26 }}
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ type: "spring", stiffness: 400, damping: 28 }}
     >
       <div className="message-avatar-container">
         <motion.div
           className="message-avatar"
-          whileHover={{ scale: 1.12, rotate: isUser ? -8 : 8 }}
-          whileTap={{ scale: 0.92 }}
+          whileHover={{ scale: 1.08 }}
+          whileTap={{ scale: 0.94 }}
           transition={{ type: "spring", stiffness: 450, damping: 20 }}
         >
           {isUser ? "U" : <Sparkles size={15} strokeWidth={2.2} color="#FFFFFF" />}
@@ -266,107 +245,101 @@ export function MessageBubble({ message, onOpenCitation }: MessageBubbleProps) {
                     <CodeBlock className={className}>{children}</CodeBlock>
                   );
                 },
+                hr() {
+                  return <hr style={{ border: "none", borderTop: "1px solid rgba(255, 255, 255, 0.16)", margin: "16px 0" }} />;
+                },
               }}
             >
-              {preprocessLaTeX(message.content)}
+              {preprocessMarkdown(message.content)}
             </ReactMarkdown>
           )}
         </motion.div>
 
-        {/* Global Cross-Session Memory Recalled Accordion */}
-        {hasMemory && (
-          <div className="memory-recalled-container">
-            <motion.button
-              className={`memory-recalled-toggle ${memoryExpanded ? "active" : ""}`}
-              onClick={() => setMemoryExpanded(!memoryExpanded)}
-              whileHover={{ scale: 1.02, x: 2 }}
-              whileTap={{ scale: 0.98 }}
-              transition={{ type: "spring", stiffness: 400, damping: 25 }}
-            >
-              <Database size={12} color="#FFFFFF" />
-              <span>Cross-Session Memory Recalled ({message.memory_recalled!.length})</span>
-              {memoryExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-            </motion.button>
-
-            <AnimatePresence>
-              {memoryExpanded && (
-                <motion.div
-                  className="memory-list"
-                  initial={{ opacity: 0, height: 0, scale: 0.98 }}
-                  animate={{ opacity: 1, height: "auto", scale: 1 }}
-                  exit={{ opacity: 0, height: 0, scale: 0.98 }}
-                  transition={{ type: "spring", stiffness: 350, damping: 28 }}
-                >
-                  {message.memory_recalled!.map((mem, i) => (
-                    <MemoryCard key={i} memory={mem} />
-                  ))}
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
-        )}
-
-        {/* Source Citations Accordion */}
+        {/* Inline Citation Pills with Peek Popovers */}
         {hasSources && (
-          <div className="sources-container">
-            <motion.button
-              className={`sources-toggle ${sourcesExpanded ? "active" : ""}`}
-              onClick={() => setSourcesExpanded(!sourcesExpanded)}
-              whileHover={{ scale: 1.02, x: 2 }}
-              whileTap={{ scale: 0.98 }}
-              transition={{ type: "spring", stiffness: 400, damping: 25 }}
-            >
-              <BookOpen size={12} color="#FFFFFF" />
-              <span>{message.sources!.length} document chunk{message.sources!.length !== 1 ? "s" : ""} cited</span>
-              {sourcesExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-            </motion.button>
-
-            <AnimatePresence>
-              {sourcesExpanded && (
-                <motion.div
-                  className="sources-list"
-                  initial={{ opacity: 0, height: 0, scale: 0.98 }}
-                  animate={{ opacity: 1, height: "auto", scale: 1 }}
-                  exit={{ opacity: 0, height: 0, scale: 0.98 }}
-                  transition={{ type: "spring", stiffness: 350, damping: 28 }}
-                >
-                  {message.sources!.map((src, i) => (
-                    <SourceCard key={i} source={src} index={i} />
-                  ))}
-                </motion.div>
-              )}
-            </AnimatePresence>
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginTop: 8, padding: "0 2px" }}>
+            <span style={{ fontSize: 10, color: "rgba(255, 255, 255, 0.4)", display: "flex", alignItems: "center", gap: 3 }}>
+              <BookOpen size={10} /> Sources:
+            </span>
+            {message.sources!.slice(0, 4).map((src, i) => (
+              <InlineCitationChip key={i} source={src} index={i} />
+            ))}
           </div>
         )}
 
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", marginTop: 4, padding: "0 4px" }}>
-          <div className="message-timestamp">{timestamp}</div>
-          {!isUser && (
-            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <motion.button
-                onClick={handleTTS}
-                className="icon-btn"
-                style={{ width: 22, height: 22, opacity: 0.7 }}
-                whileHover={{ opacity: 1, scale: 1.1 }}
-                whileTap={{ scale: 0.9 }}
-                title={isSpeaking ? "Stop audio reading" : "Read message aloud (Text-to-Speech)"}
-              >
-                {isSpeaking ? <VolumeX size={11} color="#EF4444" /> : <Volume2 size={11} color="#FFFFFF" />}
-              </motion.button>
-
-              <motion.button
-                onClick={handleCopyMessage}
-                className="icon-btn"
-                style={{ width: 22, height: 22, opacity: 0.7 }}
-                whileHover={{ opacity: 1, scale: 1.1 }}
-                whileTap={{ scale: 0.9 }}
-                title="Copy message text"
-              >
-                {copiedBubble ? <Check size={11} color="#FFFFFF" /> : <Copy size={11} color="#FFFFFF" />}
-              </motion.button>
-            </div>
-          )}
+        <div className="message-timestamp">
+          {isUser ? "You" : "DocMind AI"} {timeStr && `• ${timeStr}`}
         </div>
+      </div>
+    </motion.div>
+  );
+}
+
+// ── Streaming Message Component ──────────────────────────────────────────────
+
+export interface StreamingMessageProps {
+  content: string;
+  sources?: Source[];
+  memories?: MemoryItem[];
+}
+
+export function StreamingMessage({ content, sources, memories }: StreamingMessageProps) {
+  return (
+    <motion.div
+      className="message assistant streaming-active"
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ type: "spring", stiffness: 350, damping: 26 }}
+    >
+      <div className="message-avatar-container">
+        <div className="message-avatar pulse-glow">
+          <Sparkles size={15} color="#FFFFFF" />
+        </div>
+      </div>
+      <div className="message-body">
+        <div className="message-bubble">
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm, remarkMath]}
+            rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false, errorColor: "inherit" }]]}
+            components={{
+              table({ children, ...props }) {
+                return (
+                  <div style={{ width: "100%", overflowX: "auto", margin: "10px 0", WebkitOverflowScrolling: "touch" }}>
+                    <table style={{ margin: 0 }} {...props}>{children}</table>
+                  </div>
+                );
+              },
+              code({ className, children, ...props }) {
+                const isInline = !String(children).includes("\n") && !className;
+                return isInline ? (
+                  <code className="inline-code" {...props}>
+                    {children}
+                  </code>
+                ) : (
+                  <CodeBlock className={className}>{children}</CodeBlock>
+                );
+              },
+              hr() {
+                return <hr style={{ border: "none", borderTop: "1px solid rgba(255, 255, 255, 0.16)", margin: "16px 0" }} />;
+              },
+            }}
+          >
+            {preprocessMarkdown(content)}
+          </ReactMarkdown>
+          <span className="streaming-cursor" />
+        </div>
+
+        {memories && memories.length > 0 && (
+          <motion.div
+            className="streaming-memory-pill"
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ type: "spring", stiffness: 400, damping: 25 }}
+          >
+            <Database size={11} color="#FFFFFF" />
+            <span>Cross-session memory connected ({memories.length} item{memories.length !== 1 ? "s" : ""})</span>
+          </motion.div>
+        )}
       </div>
     </motion.div>
   );
@@ -376,12 +349,15 @@ export function MessageBubble({ message, onOpenCitation }: MessageBubbleProps) {
 
 export function TypingIndicator() {
   const [statusIndex, setStatusIndex] = useState(0);
-  const statusMessages = [
-    "Synthesizing hierarchical semantic vectors…",
-    "Searching dense embeddings & BM25 index…",
-    "Evaluating Cross-Encoder relevance scores…",
-    "Generating multi-LLM response…",
-  ];
+  const statusMessages = useMemo(
+    () => [
+      "Synthesizing hierarchical semantic vectors…",
+      "Searching dense embeddings & BM25 index…",
+      "Evaluating Cross-Encoder relevance scores…",
+      "Generating multi-LLM response…",
+    ],
+    []
+  );
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -427,69 +403,3 @@ export function TypingIndicator() {
   );
 }
 
-// ── Monochromatic Streaming Message Component ────────────────────────────────
-
-interface StreamingMessageProps {
-  content: string;
-  sources?: Source[];
-  memories?: MemoryItem[];
-}
-
-export function StreamingMessage({ content, sources, memories }: StreamingMessageProps) {
-  return (
-    <motion.div
-      className="message assistant streaming-active"
-      initial={{ opacity: 0, y: 10 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ type: "spring", stiffness: 350, damping: 26 }}
-    >
-      <div className="message-avatar-container">
-        <div className="message-avatar pulse-glow">
-          <Sparkles size={15} color="#FFFFFF" />
-        </div>
-      </div>
-      <div className="message-body">
-        <div className="message-bubble">
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm, remarkMath]}
-            rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false, errorColor: "inherit" }]]}
-            components={{
-              table({ children, ...props }) {
-                return (
-                  <div style={{ width: "100%", overflowX: "auto", margin: "10px 0", WebkitOverflowScrolling: "touch" }}>
-                    <table style={{ margin: 0 }} {...props}>{children}</table>
-                  </div>
-                );
-              },
-              code({ className, children, ...props }) {
-                const isInline = !String(children).includes("\n") && !className;
-                return isInline ? (
-                  <code className="inline-code" {...props}>
-                    {children}
-                  </code>
-                ) : (
-                  <CodeBlock className={className}>{children}</CodeBlock>
-                );
-              },
-            }}
-          >
-            {preprocessLaTeX(content)}
-          </ReactMarkdown>
-          <span className="streaming-cursor" />
-        </div>
-
-        {memories && memories.length > 0 && (
-          <motion.div
-            className="streaming-memory-pill"
-            initial={{ opacity: 0, scale: 0.9 }}
-            animate={{ opacity: 1, scale: 1 }}
-            transition={{ type: "spring", stiffness: 400, damping: 25 }}
-          >
-            <Database size={11} color="#FFFFFF" />
-            <span>Cross-session memory connected ({memories.length} item{memories.length !== 1 ? "s" : ""})</span>
-          </motion.div>
-        )}
-      </div>
-    </motion.div>
-  );
-}

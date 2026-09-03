@@ -37,6 +37,7 @@ import { QuizModal } from "@/components/QuizModal";
 import { CompareModal } from "@/components/CompareModal";
 import { UrlIngestModal } from "@/components/UrlIngestModal";
 import { DocumentViewerModal } from "@/components/DocumentViewerModal";
+import { CommandPaletteModal } from "@/components/CommandPaletteModal";
 import {
   listSessions,
   createSession,
@@ -57,6 +58,7 @@ import {
   clearAllMemories,
   QuizQuestion,
 } from "@/lib/api";
+import { exportSessionToPdf } from "@/lib/pdfExporter";
 import { ApiKeys, Document, Message, Session, Source, MemoryItem } from "@/lib/types";
 
 function loadKeys(): ApiKeys {
@@ -108,6 +110,7 @@ export default function HomePage() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSession, setActiveSession] = useState<Session | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [isExportingPdf, setIsExportingPdf] = useState(false);
   const [inputValue, setInputValue] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamingContent, setStreamingContent] = useState("");
@@ -149,6 +152,11 @@ export default function HomePage() {
   const [viewerDoc, setViewerDoc] = useState<Document | null>(null);
   const [viewerPage, setViewerPage] = useState(1);
   const [isViewerOpen, setIsViewerOpen] = useState(false);
+
+  // Command Palette & In-Chat Search States
+  const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
+  const [isChatSearchOpen, setIsChatSearchOpen] = useState(false);
+  const [chatSearchQuery, setChatSearchQuery] = useState("");
 
   // Handler functions for upgrade tools
   const handleOpenQuiz = async () => {
@@ -235,8 +243,27 @@ export default function HomePage() {
     }
   };
 
-  const handleExportChat = (formatType: "markdown" | "json" | "print" = "markdown") => {
+  const handleExportChat = async (formatType: "pdf" | "markdown" | "json" | "print" = "pdf") => {
     if (!activeSession || messages.length === 0) return;
+
+    if (formatType === "pdf") {
+      try {
+        setIsExportingPdf(true);
+        showToast("Generating PDF document…");
+        await exportSessionToPdf(activeSession, messages, (status) => {
+          showToast(status);
+        });
+        showToast("PDF exported successfully!");
+      } catch (err: any) {
+        console.error("PDF export error:", err);
+        showToast("Exporting via print engine…");
+        window.print();
+      } finally {
+        setIsExportingPdf(false);
+      }
+      return;
+    }
+
     if (formatType === "print") {
       window.print();
       return;
@@ -322,12 +349,17 @@ export default function HomePage() {
         toggleSidebar();
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
-        handleNewChat();
+        setIsCommandPaletteOpen((prev) => !prev);
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+        e.preventDefault();
+        setIsChatSearchOpen((prev) => !prev);
       } else if (e.key === "?" && !isInputActive && !e.ctrlKey && !e.metaKey && !e.altKey) {
         e.preventDefault();
         setModal((prev) => (prev === "shortcuts" ? "none" : "shortcuts"));
       } else if (e.key === "Escape") {
         setIsEditingTitle(false);
+        setIsCommandPaletteOpen(false);
+        setIsChatSearchOpen(false);
         setModal("none");
       }
     };
@@ -489,8 +521,8 @@ export default function HomePage() {
   };
 
   // ── Send Message ────────────────────────────────────────────────────────────
-  const handleSend = async () => {
-    const text = inputValue.trim();
+  const handleSend = async (overrideText?: string | React.MouseEvent) => {
+    const text = (typeof overrideText === "string" ? overrideText : inputValue).trim();
     if (!text || isStreaming) return;
 
     if (!apiKeys.gemini && !apiKeys.groq && !apiKeys.openrouter) {
@@ -994,6 +1026,34 @@ export default function HomePage() {
             </div>
 
             <div className="topbar-actions">
+              <motion.button
+                className="topbar-action-btn"
+                onClick={() => setIsCommandPaletteOpen(true)}
+                whileHover={{ scale: 1.04 }}
+                whileTap={{ scale: 0.95 }}
+                title="Launch Command Palette (Cmd+K)"
+              >
+                <Search size={13} />
+                <span className="hide-on-tablet">Launch</span>
+                <kbd style={{ fontSize: 9, padding: "1px 4px", background: "rgba(255,255,255,0.1)", borderRadius: 3 }}>⌘K</kbd>
+              </motion.button>
+
+              {hasSession && messages.length > 0 && (
+                <motion.button
+                  className="topbar-icon-btn"
+                  onClick={() => {
+                    setIsChatSearchOpen((prev) => !prev);
+                    if (isChatSearchOpen) setChatSearchQuery("");
+                  }}
+                  whileHover={{ scale: 1.08 }}
+                  whileTap={{ scale: 0.92 }}
+                  title="Search conversation (Ctrl+F)"
+                  aria-label="Search conversation"
+                >
+                  <Search size={14} color={isChatSearchOpen ? "#60A5FA" : "#FFFFFF"} />
+                </motion.button>
+              )}
+
               {hasSession && currentDocs.length > 0 && (
                 <motion.button
                   className="topbar-action-btn summarize-btn"
@@ -1011,12 +1071,17 @@ export default function HomePage() {
               {hasSession && messages.length > 0 && (
                 <motion.button
                   className="topbar-action-btn hide-on-tablet"
-                  onClick={() => handleExportChat("markdown")}
+                  onClick={() => handleExportChat("pdf")}
+                  disabled={isExportingPdf}
                   whileHover={{ scale: 1.04 }}
                   whileTap={{ scale: 0.95 }}
-                  title="Export conversation as Markdown"
+                  title="Export conversation as styled PDF"
                 >
-                  <Download size={13.5} />
+                  {isExportingPdf ? (
+                    <div className="spin" style={{ width: 13, height: 13, border: "1.5px solid #FFFFFF", borderTopColor: "transparent", borderRadius: "50%" }} />
+                  ) : (
+                    <Download size={13.5} />
+                  )}
                   <span>Export</span>
                 </motion.button>
               )}
@@ -1066,6 +1131,61 @@ export default function HomePage() {
               </motion.button>
             </div>
           </header>
+
+          {/* In-Chat Search Bar */}
+          <AnimatePresence>
+            {isChatSearchOpen && (
+              <motion.div
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: "auto" }}
+                exit={{ opacity: 0, height: 0 }}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 10,
+                  padding: "8px 20px",
+                  background: "rgba(12, 12, 16, 0.96)",
+                  borderBottom: "1px solid rgba(255, 255, 255, 0.1)",
+                  backdropFilter: "blur(12px)",
+                  zIndex: 20,
+                }}
+              >
+                <Search size={13} color="rgba(255, 255, 255, 0.5)" />
+                <input
+                  type="text"
+                  value={chatSearchQuery}
+                  onChange={(e) => setChatSearchQuery(e.target.value)}
+                  placeholder="Find in this chat…"
+                  autoFocus
+                  style={{
+                    flex: 1,
+                    background: "transparent",
+                    border: "none",
+                    outline: "none",
+                    color: "#FFFFFF",
+                    fontSize: 12,
+                    fontFamily: "inherit",
+                  }}
+                />
+                {chatSearchQuery && (
+                  <span style={{ fontSize: 11, color: "rgba(255, 255, 255, 0.5)" }}>
+                    {messages.filter((m) => m.content.toLowerCase().includes(chatSearchQuery.toLowerCase())).length} found
+                  </span>
+                )}
+                <button
+                  className="icon-btn"
+                  onClick={() => {
+                    setIsChatSearchOpen(false);
+                    setChatSearchQuery("");
+                  }}
+                  style={{ width: 20, height: 20 }}
+                  title="Close search"
+                >
+                  <X size={12} />
+                </button>
+              </motion.div>
+            )}
+          </AnimatePresence>
 
           {hasSession ? (
             <>
@@ -1217,8 +1337,14 @@ export default function HomePage() {
                   )}
 
                   <AnimatePresence initial={false}>
-                    {messages.map((msg) => (
-                      <MessageBubble key={msg.id} message={msg} />
+                    {messages.map((msg, idx) => (
+                      <MessageBubble
+                        key={msg.id}
+                        message={msg}
+                        isLatest={idx === messages.length - 1}
+                        onOpenCitation={handleOpenCitation}
+                        onSelectFollowUp={(q) => handleSend(q)}
+                      />
                     ))}
                   </AnimatePresence>
 
@@ -1470,6 +1596,26 @@ export default function HomePage() {
             onClose={() => setIsUrlModalOpen(false)}
             onIngest={handleIngestUrl}
             isLoading={isUrlLoading}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Global Command Palette (Cmd+K / Ctrl+K) */}
+      <AnimatePresence>
+        {isCommandPaletteOpen && (
+          <CommandPaletteModal
+            isOpen={isCommandPaletteOpen}
+            onClose={() => setIsCommandPaletteOpen(false)}
+            sessions={sessions}
+            onSelectSession={handleSelectSession}
+            onNewChat={handleNewChat}
+            onOpenQuiz={() => handleOpenQuiz()}
+            onOpenCompare={() => setIsCompareOpen(true)}
+            onOpenUrlIngest={() => setIsUrlModalOpen(true)}
+            onOpenUpload={() => setModal("upload")}
+            onOpenMemory={() => setModal("memory")}
+            onExport={handleExportChat}
+            onOpenSettings={() => setModal("settings")}
           />
         )}
       </AnimatePresence>

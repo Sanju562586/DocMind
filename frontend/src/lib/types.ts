@@ -47,6 +47,9 @@ export interface SystemStats {
 export interface Source {
   child_text: string;
   section: string;
+  doc_id?: string;
+  title?: string;
+  page_number?: number;
   rerank_score: number;
   bm25_score: number;
   dense_score: number;

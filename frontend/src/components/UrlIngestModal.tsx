@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { Globe, X, ArrowRight, Link as LinkIcon, Sparkles } from "lucide-react";
+import { useState, useEffect } from "react";
+import { Globe, X, ArrowRight, Link as LinkIcon, Sparkles, Check } from "lucide-react";
 import { motion } from "framer-motion";
 
 interface UrlIngestModalProps {
@@ -14,6 +14,21 @@ interface UrlIngestModalProps {
 export function UrlIngestModal({ isOpen, onClose, onIngest, isLoading }: UrlIngestModalProps) {
   const [url, setUrl] = useState("");
   const [error, setError] = useState("");
+  const [ingestionStep, setIngestionStep] = useState(1);
+
+  useEffect(() => {
+    if (isLoading) {
+      setIngestionStep(1);
+      const t1 = setTimeout(() => setIngestionStep(2), 600);
+      const t2 = setTimeout(() => setIngestionStep(3), 1400);
+      const t3 = setTimeout(() => setIngestionStep(4), 2200);
+      return () => {
+        clearTimeout(t1);
+        clearTimeout(t2);
+        clearTimeout(t3);
+      };
+    }
+  }, [isLoading]);
 
   if (!isOpen) return null;
 
@@ -123,9 +138,88 @@ export function UrlIngestModal({ isOpen, onClose, onIngest, isLoading }: UrlInge
             />
           </div>
 
-          {error && (
-            <div style={{ color: "#EF4444", fontSize: 12, marginTop: 8, paddingLeft: 2 }}>
-              ⚠️ {error}
+          {/* Real-Time 4-Step URL Ingestion Stepper */}
+          {isLoading && (
+            <div
+              style={{
+                background: "rgba(255, 255, 255, 0.03)",
+                border: "1px solid rgba(255, 255, 255, 0.08)",
+                borderRadius: 10,
+                padding: "12px 14px",
+                marginTop: 14,
+                display: "flex",
+                flexDirection: "column",
+                gap: 8,
+              }}
+            >
+              {[
+                { step: 1, label: "Connecting & Fetching HTML Content" },
+                { step: 2, label: "Cleaning Boilerplate & Parsing Article" },
+                { step: 3, label: "Hierarchical Contextual Chunking" },
+                { step: 4, label: "Neural Vector & BM25 Indexing" },
+              ].map(({ step, label }) => {
+                const isFinished = ingestionStep > step;
+                const isCurrent = ingestionStep === step;
+
+                return (
+                  <div
+                    key={step}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 10,
+                      fontSize: 12,
+                      color: isFinished
+                        ? "#4ADE80"
+                        : isCurrent
+                        ? "#FFFFFF"
+                        : "rgba(255, 255, 255, 0.35)",
+                      fontWeight: isCurrent || isFinished ? 500 : 400,
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: 18,
+                        height: 18,
+                        borderRadius: "50%",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        fontSize: 10,
+                        fontWeight: 700,
+                        background: isFinished
+                          ? "rgba(74, 222, 128, 0.15)"
+                          : isCurrent
+                          ? "rgba(255, 255, 255, 0.15)"
+                          : "rgba(255, 255, 255, 0.05)",
+                        border: isFinished
+                          ? "1px solid #4ADE80"
+                          : isCurrent
+                          ? "1px solid #FFFFFF"
+                          : "1px solid rgba(255, 255, 255, 0.1)",
+                      }}
+                    >
+                      {isFinished ? (
+                        <Check size={11} color="#4ADE80" />
+                      ) : isCurrent ? (
+                        <div
+                          className="spin"
+                          style={{
+                            width: 8,
+                            height: 8,
+                            border: "1.2px solid #FFFFFF",
+                            borderTopColor: "transparent",
+                            borderRadius: "50%",
+                          }}
+                        />
+                      ) : (
+                        step
+                      )}
+                    </div>
+                    <span>{label}</span>
+                  </div>
+                );
+              })}
             </div>
           )}
 

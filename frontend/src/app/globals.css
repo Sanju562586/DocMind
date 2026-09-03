@@ -2565,3 +2565,220 @@ body {
   border-radius: 4px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
 }
+
+/* ── PDF Export Container & Bubble Styles ────────────────────────────────── */
+#docmind-pdf-export-stage {
+  color-scheme: dark;
+}
+
+#docmind-pdf-export-stage h1,
+#docmind-pdf-export-stage h2,
+#docmind-pdf-export-stage h3,
+#docmind-pdf-export-stage h4 {
+  color: #FFFFFF;
+  font-weight: 700;
+  margin-top: 12px;
+  margin-bottom: 6px;
+  line-height: 1.35;
+}
+
+#docmind-pdf-export-stage h1 { font-size: 16px; }
+#docmind-pdf-export-stage h2 { font-size: 14px; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 4px; }
+#docmind-pdf-export-stage h3 { font-size: 13px; }
+
+#docmind-pdf-export-stage p {
+  margin-bottom: 8px;
+}
+#docmind-pdf-export-stage p:last-child {
+  margin-bottom: 0;
+}
+
+#docmind-pdf-export-stage ul,
+#docmind-pdf-export-stage ol {
+  margin: 6px 0 8px 18px;
+}
+
+#docmind-pdf-export-stage li {
+  margin-bottom: 4px;
+}
+
+#docmind-pdf-export-stage blockquote {
+  border-left: 3px solid #FFFFFF;
+  padding: 4px 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 0 4px 4px 0;
+  margin: 8px 0;
+  color: #D4D4D4;
+}
+
+#docmind-pdf-export-stage table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 10px 0;
+  font-size: 12px;
+  background: rgba(0, 0, 0, 0.7);
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+#docmind-pdf-export-stage th,
+#docmind-pdf-export-stage td {
+  padding: 7px 10px;
+  text-align: left;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+#docmind-pdf-export-stage th {
+  background: rgba(255, 255, 255, 0.08);
+  color: #FFFFFF;
+  font-weight: 700;
+}
+
+#docmind-pdf-export-stage .inline-code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11.5px;
+  padding: 2px 5px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  color: #FFFFFF;
+}
+
+#docmind-pdf-export-stage .code-block-wrapper {
+  margin: 10px 0;
+  background: #080808;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+#docmind-pdf-export-stage .code-block-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+#docmind-pdf-export-stage .code-block-lang {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: #888888;
+  text-transform: uppercase;
+  font-weight: 700;
+}
+
+#docmind-pdf-export-stage .code-copy-btn {
+  display: none;
+}
+
+#docmind-pdf-export-stage .code-block-pre {
+  padding: 10px 12px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: #FFFFFF;
+  overflow-x: auto;
+}
+
+#docmind-pdf-export-stage .katex-display {
+  margin: 10px 0;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+}
+
+#docmind-pdf-export-stage .katex {
+  font-size: 1.04em;
+  color: #FFFFFF;
+}
+
+/* ── High-Fidelity Native Browser Print to PDF ───────────────────────────── */
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 12mm 10mm 12mm 10mm;
+  }
+
+  html, body {
+    height: auto !important;
+    overflow: visible !important;
+    background: #000000 !important;
+    color: #FFFFFF !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  .sidebar,
+  .topbar,
+  .chat-input-wrapper,
+  .interactive-bg-wrapper,
+  .scroll-to-bottom-btn,
+  .code-copy-btn,
+  .message-actions-hover,
+  .sources-toggle,
+  .doc-chip button,
+  .context-strip button,
+  .modal-overlay,
+  .context-strip {
+    display: none !important;
+  }
+
+  .app-shell {
+    display: block !important;
+    height: auto !important;
+    overflow: visible !important;
+  }
+
+  .main-content {
+    display: block !important;
+    height: auto !important;
+    overflow: visible !important;
+    background: #000000 !important;
+  }
+
+  .chat-scrollable {
+    overflow: visible !important;
+    height: auto !important;
+    padding: 0 !important;
+  }
+
+  .chat-container {
+    max-width: 100% !important;
+    gap: 16px !important;
+  }
+
+  .message {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+    margin-bottom: 16px !important;
+  }
+
+  .message-bubble {
+    box-shadow: none !important;
+    border: 1px solid rgba(255, 255, 255, 0.25) !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+
+  .message.assistant .message-bubble {
+    background: #080808 !important;
+    color: #FFFFFF !important;
+  }
+
+  .message.user .message-bubble {
+    background: #141414 !important;
+    color: #FFFFFF !important;
+  }
+
+  .code-block-wrapper {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+    background: #080808 !important;
+    border: 1px solid rgba(255, 255, 255, 0.18) !important;
+  }
+}
+

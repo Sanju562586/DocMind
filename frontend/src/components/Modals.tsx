@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useCallback } from "react";
-import { X, Upload, Key, Check, AlertCircle, FileText, Shield } from "lucide-react";
+import { useState, useCallback, useEffect } from "react";
+import { X, Upload, Key, Check, AlertCircle, FileText, Shield, Layers, Cpu, CheckCircle2 } from "lucide-react";
 import { useDropzone } from "react-dropzone";
 import { motion, AnimatePresence } from "framer-motion";
 import { ApiKeys, Document } from "@/lib/types";
@@ -162,6 +162,21 @@ export function DocumentUploadModal({
   const [stage, setStage] = useState<UploadStage>("idle");
   const [error, setError] = useState("");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [ingestionStep, setIngestionStep] = useState(1);
+
+  useEffect(() => {
+    if (stage === "uploading") {
+      setIngestionStep(1);
+      const t1 = setTimeout(() => setIngestionStep(2), 600);
+      const t2 = setTimeout(() => setIngestionStep(3), 1400);
+      const t3 = setTimeout(() => setIngestionStep(4), 2200);
+      return () => {
+        clearTimeout(t1);
+        clearTimeout(t2);
+        clearTimeout(t3);
+      };
+    }
+  }, [stage]);
 
   const processFile = useCallback(
     async (file: File) => {
@@ -172,6 +187,7 @@ export function DocumentUploadModal({
       try {
         const doc = await uploadDocumentToSession(sessionId, file, apiKeys);
         setStage("done");
+        setIngestionStep(4);
         setTimeout(() => {
           onUploaded(doc);
           onClose();
@@ -298,10 +314,97 @@ export function DocumentUploadModal({
               <motion.div
                 className="progress-bar"
                 initial={{ width: 0 }}
-                animate={{ width: stage === "done" ? "100%" : stage === "uploading" ? "75%" : "0%" }}
+                animate={{ width: stage === "done" ? "100%" : `${ingestionStep * 24}%` }}
                 transition={{ duration: 0.4 }}
               />
             </div>
+
+            {/* Real-Time 4-Step Ingestion Stepper */}
+            {(stage === "uploading" || stage === "done") && (
+              <div
+                style={{
+                  background: "rgba(255, 255, 255, 0.03)",
+                  border: "1px solid rgba(255, 255, 255, 0.08)",
+                  borderRadius: 10,
+                  padding: "12px 14px",
+                  marginTop: 10,
+                  marginBottom: 10,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 8,
+                }}
+              >
+                {[
+                  { step: 1, label: "File Upload & Integrity Check" },
+                  { step: 2, label: "Text Extraction & Multimodal OCR" },
+                  { step: 3, label: "Hierarchical Semantic Chunking" },
+                  { step: 4, label: "Dense Vector & BM25 Hybrid Indexing" },
+                ].map(({ step, label }) => {
+                  const isFinished = stage === "done" || ingestionStep > step;
+                  const isCurrent = stage === "uploading" && ingestionStep === step;
+
+                  return (
+                    <div
+                      key={step}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 10,
+                        fontSize: 12,
+                        color: isFinished
+                          ? "#4ADE80"
+                          : isCurrent
+                          ? "#FFFFFF"
+                          : "rgba(255, 255, 255, 0.35)",
+                        fontWeight: isCurrent || isFinished ? 500 : 400,
+                        transition: "color 0.2s ease",
+                      }}
+                    >
+                      <div
+                        style={{
+                          width: 18,
+                          height: 18,
+                          borderRadius: "50%",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          fontSize: 10,
+                          fontWeight: 700,
+                          background: isFinished
+                            ? "rgba(74, 222, 128, 0.15)"
+                            : isCurrent
+                            ? "rgba(255, 255, 255, 0.15)"
+                            : "rgba(255, 255, 255, 0.05)",
+                          border: isFinished
+                            ? "1px solid #4ADE80"
+                            : isCurrent
+                            ? "1px solid #FFFFFF"
+                            : "1px solid rgba(255, 255, 255, 0.1)",
+                        }}
+                      >
+                        {isFinished ? (
+                          <Check size={11} color="#4ADE80" />
+                        ) : isCurrent ? (
+                          <div
+                            className="spin"
+                            style={{
+                              width: 8,
+                              height: 8,
+                              border: "1.2px solid #FFFFFF",
+                              borderTopColor: "transparent",
+                              borderRadius: "50%",
+                            }}
+                          />
+                        ) : (
+                          step
+                        )}
+                      </div>
+                      <span>{label}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
 
             <div className="upload-status-row">
               {stage === "uploading" && (
