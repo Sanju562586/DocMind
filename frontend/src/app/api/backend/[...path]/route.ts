@@ -11,6 +11,18 @@ const BACKEND_URL = (
   .replace(/\/+$/, "")
   .replace(/\/api$/, "");
 
+function safeParseJson(str: string): any {
+  try {
+    return JSON.parse(str);
+  } catch {
+    try {
+      return JSON.parse(decodeURIComponent(str));
+    } catch {
+      return null;
+    }
+  }
+}
+
 async function handleProxy(
   req: NextRequest,
   { params }: { params: Promise<{ path: string[] }> }
@@ -25,14 +37,47 @@ async function handleProxy(
     targetUrl.searchParams.set(key, val);
   });
 
-  // Forward incoming headers (except host and content-length)
+  // Forward incoming headers (except host, content-length, connection)
   const headers = new Headers();
   req.headers.forEach((val, key) => {
     const lower = key.toLowerCase();
-    if (lower !== "host" && lower !== "content-length" && lower !== "connection") {
+    if (
+      lower !== "host" &&
+      lower !== "content-length" &&
+      lower !== "connection"
+    ) {
       headers.set(key, val);
     }
   });
+
+  // 1. Inject Authenticated User Identity from signed JWT or verified cookie
+  const sessionToken = req.cookies.get("docmind_session")?.value;
+  if (sessionToken) {
+    headers.set("Authorization", `Bearer ${sessionToken}`);
+  }
+
+  const userCookie = req.cookies.get("docmind_user")?.value;
+  if (userCookie) {
+    const user = safeParseJson(userCookie);
+    if (user?.id) headers.set("X-User-Id", user.id);
+    if (user?.email) headers.set("X-User-Email", user.email);
+    if (user?.name) headers.set("X-User-Name", user.name);
+  }
+
+  // 2. Inject Secure HTTP-only API Keys server-to-server
+  const keysCookie = req.cookies.get("docmind_keys")?.value;
+  if (keysCookie) {
+    const keys = safeParseJson(keysCookie);
+    if (keys?.gemini && (!headers.get("X-Gemini-Key") || !headers.get("X-Gemini-Key")?.trim())) {
+      headers.set("X-Gemini-Key", keys.gemini);
+    }
+    if (keys?.groq && (!headers.get("X-Groq-Key") || !headers.get("X-Groq-Key")?.trim())) {
+      headers.set("X-Groq-Key", keys.groq);
+    }
+    if (keys?.openrouter && (!headers.get("X-OpenRouter-Key") || !headers.get("X-OpenRouter-Key")?.trim())) {
+      headers.set("X-OpenRouter-Key", keys.openrouter);
+    }
+  }
 
   const method = req.method;
   const isBodyAllowed = method !== "GET" && method !== "HEAD";

@@ -19,6 +19,7 @@ import {
   Zap,
   Layers,
   FileText,
+  ExternalLink,
 } from "lucide-react";
 import { Message, Source, MemoryItem } from "@/lib/types";
 import { format, parseISO } from "date-fns";
@@ -117,7 +118,15 @@ function SourceCard({ source, index }: { source: Source; index: number }) {
 
 // ── Inline Citation Chip Component ──────────────────────────────────────────
 
-function InlineCitationChip({ source, index }: { source: Source; index: number }) {
+function InlineCitationChip({
+  source,
+  index,
+  onOpenCitation,
+}: {
+  source: Source;
+  index: number;
+  onOpenCitation?: (docId?: string, pageNum?: number) => void;
+}) {
   const [isOpen, setIsOpen] = useState(false);
   const textSnippet = source.snippet || source.child_text || "";
 
@@ -174,10 +183,40 @@ function InlineCitationChip({ source, index }: { source: Source; index: number }
             {source.title || "Extracted Source"}
           </div>
           {textSnippet && (
-            <div style={{ fontSize: 10.5, color: "#AAAAAA", lineHeight: 1.45 }}>
+            <div style={{ fontSize: 10.5, color: "#AAAAAA", lineHeight: 1.45, marginBottom: 6 }}>
               "{textSnippet}"
             </div>
           )}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 6, paddingTop: 6, borderTop: "1px solid rgba(255, 255, 255, 0.1)" }}>
+            <span style={{ fontSize: 10, color: "rgba(255, 255, 255, 0.5)" }}>
+              {source.page_number ? `Page ${source.page_number}` : "Document"}
+            </span>
+            {onOpenCitation && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenCitation(source.doc_id, source.page_number);
+                  setIsOpen(false);
+                }}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 4,
+                  padding: "3px 8px",
+                  background: "rgba(255, 255, 255, 0.15)",
+                  border: "1px solid rgba(255, 255, 255, 0.25)",
+                  borderRadius: 4,
+                  fontSize: 10,
+                  color: "#FFFFFF",
+                  cursor: "pointer",
+                }}
+              >
+                <ExternalLink size={10} />
+                <span>Open in Viewer</span>
+              </button>
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -270,7 +309,12 @@ export function MessageBubble({ message, isLatest, onOpenCitation, onSelectFollo
               <BookOpen size={10} /> Sources:
             </span>
             {message.sources!.slice(0, 4).map((src, i) => (
-              <InlineCitationChip key={i} source={src} index={i} />
+              <InlineCitationChip
+                key={i}
+                source={src}
+                index={i}
+                onOpenCitation={onOpenCitation}
+              />
             ))}
           </div>
         )}

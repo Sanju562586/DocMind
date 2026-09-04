@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { Scale, X, Sparkles, FileText, Upload, CheckSquare, Square } from "lucide-react";
 import { motion } from "framer-motion";
 import { Document, Session } from "@/lib/types";
@@ -38,15 +38,25 @@ export function CompareModal({
   const availableDocs = useMemo(() => {
     const map = new Map<string, Document>();
     if (activeSession?.documents) {
-      activeSession.documents.forEach((d) => map.set(d.doc_id, d));
+      activeSession.documents.forEach((d) => {
+        const id = d.doc_id || (d as any).id;
+        if (id) map.set(id, { ...d, doc_id: id });
+      });
     }
     sessions.forEach((s) => {
       s.documents?.forEach((d) => {
-        if (!map.has(d.doc_id)) map.set(d.doc_id, d);
+        const id = d.doc_id || (d as any).id;
+        if (id && !map.has(id)) map.set(id, { ...d, doc_id: id });
       });
     });
     return Array.from(map.values());
   }, [activeSession, sessions]);
+
+  useEffect(() => {
+    if (isOpen && availableDocs.length > 0) {
+      setSelectedIds(availableDocs.map((d) => d.doc_id || (d as any).id));
+    }
+  }, [isOpen, availableDocs]);
 
   if (!isOpen) return null;
 
@@ -57,7 +67,7 @@ export function CompareModal({
   };
 
   const handleRun = () => {
-    const docsToCompare = selectedIds.length > 0 ? selectedIds : availableDocs.slice(0, 4).map((d) => d.doc_id);
+    const docsToCompare = selectedIds.length > 0 ? selectedIds : availableDocs.slice(0, 4).map((d) => d.doc_id || (d as any).id);
     onStartComparison(docsToCompare, focusTopic);
   };
 
@@ -171,7 +181,7 @@ export function CompareModal({
                   </label>
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
                     {availableDocs.map((doc) => {
-                      const isChecked = selectedIds.includes(doc.doc_id) || selectedIds.length === 0;
+                      const isChecked = selectedIds.includes(doc.doc_id);
                       return (
                         <div
                           key={doc.doc_id}

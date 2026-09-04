@@ -1,5 +1,23 @@
 // Types shared across the frontend
 
+export interface User {
+  id: string;
+  name: string;
+  email: string;
+  image?: string;
+  role?: string;
+  provider?: string;
+  isDemo?: boolean;
+}
+
+export interface KeyStatus {
+  gemini_configured: boolean;
+  groq_configured: boolean;
+  openrouter_configured: boolean;
+  has_custom_keys: boolean;
+  has_server_keys: boolean;
+}
+
 export interface Document {
   doc_id: string;
   session_id: string;
@@ -16,11 +34,41 @@ export interface Document {
 
 export interface Session {
   id: string;
+  user_id?: string;
   title: string;
   created_at: string;
   updated_at: string;
   documents: Document[];
   message_count: number;
+  is_shared?: boolean;
+  share_token?: string;
+  shared_at?: string;
+}
+
+export interface SharedDocument {
+  id: string;
+  filename: string;
+  file_type: string;
+  word_count?: number;
+  chunk_count?: number;
+}
+
+export interface SharedMessage {
+  id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  sources?: Source[];
+  created_at: string;
+}
+
+export interface SharedSession {
+  session_id: string;
+  title: string;
+  created_at: string;
+  shared_at: string;
+  documents: SharedDocument[];
+  messages: SharedMessage[];
+  is_shared: boolean;
 }
 
 export interface MemoryItem {
@@ -42,6 +90,7 @@ export interface SystemStats {
   total_memory_items: number;
   total_words_indexed: number;
   total_chunks_indexed: number;
+  user_id?: string;
 }
 
 export interface Source {
@@ -81,3 +130,23 @@ export type UploadStatus =
   | "indexing"
   | "done"
   | "error";
+
+export interface HealthStatus {
+  status: string;
+  service: string;
+  version: string;
+  neural_models_ready: boolean;
+  rate_limiter?: string;
+  storage_backend?: string;
+  task_queue?: {
+    max_workers: number;
+    queue_size: number;
+    pending: number;
+    running: number;
+    completed: number;
+    failed: number;
+    total_tasks: number;
+  };
+  providers_available?: string[];
+}
+

@@ -12,6 +12,7 @@ Also includes:
 """
 
 import os
+import time
 import pickle
 import logging
 import math
@@ -165,7 +166,7 @@ class HybridRetriever:
             logger.info("Initializing neural models in background (%s)...", _BI_ENCODER_MODEL)
             bi = SentenceTransformer(_BI_ENCODER_MODEL)
             self._bi_encoder = bi
-            logger.info("Bi-encoder loaded successfully ✓")
+            logger.info("Bi-encoder loaded successfully [OK]")
             
             for cb in self._on_model_ready_callbacks:
                 try:
@@ -176,7 +177,7 @@ class HybridRetriever:
             logger.info("Initializing cross-encoder in background (%s)...", _CROSS_ENCODER_MODEL)
             ce = CrossEncoder(_CROSS_ENCODER_MODEL)
             self._cross_encoder = ce
-            logger.info("Cross-encoder loaded successfully ✓")
+            logger.info("Cross-encoder loaded successfully [OK]")
         except Exception as exc:
             logger.warning("Neural transformer background load notice: %s. Continuing with fast subword embeddings.", exc)
 
@@ -192,16 +193,23 @@ class HybridRetriever:
     # Document Indexing (Session Scoped)
     # ──────────────────────────────────────────────────────────────────────
 
-    def index_session_chunks(self, session_id: str, new_chunks: List[Chunk]) -> None:
+    def index_session_chunks(self, session_id: str, new_chunks: List[Chunk], replace: bool = False) -> None:
         """Add chunks to a session's index (rebuilding session index)."""
-        if not new_chunks:
+        if not new_chunks and not replace:
             return
 
-        # Check if session already has chunks, append if so
-        existing_chunks = self.get_session_chunks(session_id)
-        # Deduplicate chunks by ID
-        existing_ids = {c.id for c in existing_chunks}
-        combined_chunks = existing_chunks + [c for c in new_chunks if c.id not in existing_ids]
+        if replace:
+            combined_chunks = new_chunks
+        else:
+            # Check if session already has chunks, append if so
+            existing_chunks = self.get_session_chunks(session_id)
+            # Deduplicate chunks by ID
+            existing_ids = {c.id for c in existing_chunks}
+            combined_chunks = existing_chunks + [c for c in new_chunks if c.id not in existing_ids]
+
+        if not combined_chunks:
+            self.delete_session_index(session_id)
+            return
 
         # BM25 indexing
         tokenized = [c.contextual_text.lower().split() for c in combined_chunks]
@@ -237,7 +245,7 @@ class HybridRetriever:
         existing = self.get_session_chunks(session_id)
         remaining = [c for c in existing if c.doc_id != doc_id]
         if remaining:
-            self.index_session_chunks(session_id, remaining)
+            self.index_session_chunks(session_id, remaining, replace=True)
         else:
             self.delete_session_index(session_id)
 
@@ -297,13 +305,18 @@ class HybridRetriever:
         if n == 0:
             return []
 
+        t_start = time.perf_counter()
+
         # ── Stage 1a: BM25 (Keyword) ──
+        t0 = time.perf_counter()
         tokenized_query = query.lower().split()
         bm25_model = self._session_bm25[session_id]
         bm25_scores = bm25_model.get_scores(tokenized_query)
         bm25_ranks = np.argsort(bm25_scores)[::-1]
+        bm25_latency = (time.perf_counter() - t0) * 1000.0
 
         # ── Stage 1b: Dense (Semantic) ──
+        t1 = time.perf_counter()
         if self._bi_encoder is not None:
             query_emb = self._bi_encoder.encode([query], normalize_embeddings=True)[0].astype(np.float32)
         else:
@@ -315,6 +328,7 @@ class HybridRetriever:
         else:
             dense_scores = np.zeros(n, dtype=np.float32)
         dense_ranks = np.argsort(dense_scores)[::-1]
+        dense_latency = (time.perf_counter() - t1) * 1000.0
 
         # ── Stage 2: Reciprocal Rank Fusion (RRF) ──
         RRF_K = 60
@@ -328,6 +342,7 @@ class HybridRetriever:
         candidate_idxs = np.argsort(rrf_scores)[::-1][:actual_candidates]
 
         # ── Stage 3: Cross-Encoder Reranking ──
+        t2 = time.perf_counter()
         if self._cross_encoder is not None and len(candidate_idxs) > 0:
             candidate_pairs = [(query, chunks[i].text) for i in candidate_idxs]
             rerank_scores = self._cross_encoder.predict(candidate_pairs, show_progress_bar=False)
@@ -337,6 +352,7 @@ class HybridRetriever:
                 0.5 * (dense_scores[i] + 1.0) / 2.0 + 0.5 * (bm25_scores[i] / (np.max(bm25_scores) + 1e-6))
                 for i in candidate_idxs
             ])
+        rerank_latency = (time.perf_counter() - t2) * 1000.0
 
         ranked = sorted(
             zip(candidate_idxs, rerank_scores),
@@ -367,6 +383,19 @@ class HybridRetriever:
                 "rrf_score": float(rrf_scores[idx]),
                 "metadata": chunk.metadata,
             })
+
+        total_latency = (time.perf_counter() - t_start) * 1000.0
+        self.last_latency_metrics = {
+            "bm25_ms": round(bm25_latency, 2),
+            "dense_ms": round(dense_latency, 2),
+            "rerank_ms": round(rerank_latency, 2),
+            "total_retrieval_ms": round(total_latency, 2),
+        }
+        try:
+            from metrics import metrics
+            metrics.record_retrieval(total_latency / 1000.0)
+        except Exception:
+            pass
 
         return results
 

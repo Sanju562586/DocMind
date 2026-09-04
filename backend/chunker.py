@@ -165,6 +165,7 @@ class HierarchicalSemanticChunker:
                     parent_index=parent_idx,
                     metadata={
                         **doc_metadata,
+                        "doc_id": doc_id,
                         "section": section_header,
                         "parent_index": parent_idx,
                         "session_id": session_id,

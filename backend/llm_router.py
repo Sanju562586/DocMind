@@ -53,7 +53,35 @@ class GeminiProvider(LLMProvider):
                 models_to_try.append(m)
 
         system_msg = next((m["content"] for m in messages if m["role"] == "system"), None)
-        chat_messages = [m for m in messages if m["role"] != "system"]
+        raw_chat = [m for m in messages if m["role"] != "system"]
+
+        # Gemini requires strictly alternating user/model turns starting with user
+        chat_messages: List[Dict] = []
+        current_role = None
+        accumulated_text: List[str] = []
+
+        for msg in raw_chat:
+            role = "user" if msg["role"] == "user" else "model"
+            content = msg.get("content", "")
+            if not content:
+                continue
+            if role == current_role:
+                accumulated_text.append(content)
+            else:
+                if current_role is not None:
+                    chat_messages.append({"role": current_role, "content": "\n\n".join(accumulated_text)})
+                current_role = role
+                accumulated_text = [content]
+
+        if current_role is not None and accumulated_text:
+            chat_messages.append({"role": current_role, "content": "\n\n".join(accumulated_text)})
+
+        if not chat_messages:
+            chat_messages = [{"role": "user", "content": "Hello"}]
+        if chat_messages[0]["role"] != "user":
+            chat_messages.insert(0, {"role": "user", "content": "Hello"})
+        if chat_messages[-1]["role"] != "user":
+            chat_messages.append({"role": "user", "content": "Please continue."})
 
         last_exc = None
         for m_name in models_to_try:
@@ -68,10 +96,9 @@ class GeminiProvider(LLMProvider):
 
                 history = []
                 for msg in chat_messages[:-1]:
-                    role = "user" if msg["role"] == "user" else "model"
-                    history.append({"role": role, "parts": [msg["content"]]})
+                    history.append({"role": msg["role"], "parts": [msg["content"]]})
 
-                last_user_msg = chat_messages[-1]["content"] if chat_messages else "Hello"
+                last_user_msg = chat_messages[-1]["content"]
 
                 # Run sync SDK stream in thread-safe generator
                 queue: asyncio.Queue = asyncio.Queue()
@@ -126,11 +153,10 @@ class GeminiProvider(LLMProvider):
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{m_name}:streamGenerateContent?alt=sse&key={key}"
                 contents = []
                 for msg in chat_messages:
-                    role = "user" if msg["role"] == "user" else "model"
-                    contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+                    contents.append({"role": msg["role"], "parts": [{"text": msg["content"]}]})
 
                 payload: Dict = {
-                    "contents": contents if contents else [{"role": "user", "parts": [{"text": "Hello"}]}],
+                    "contents": contents,
                     "generationConfig": {
                         "temperature": 0.7,
                         "maxOutputTokens": 3072,
@@ -235,10 +261,12 @@ class GroqProvider(LLMProvider):
                                 break
                             try:
                                 chunk_json = json.loads(data_str)
-                                delta = chunk_json["choices"][0].get("delta", {})
-                                if "content" in delta and delta["content"]:
-                                    yielded_any = True
-                                    yield delta["content"]
+                                choices = chunk_json.get("choices")
+                                if choices and len(choices) > 0:
+                                    delta = choices[0].get("delta", {})
+                                    if "content" in delta and delta["content"]:
+                                        yielded_any = True
+                                        yield delta["content"]
                             except Exception:
                                 pass
 
@@ -315,10 +343,12 @@ class OpenRouterProvider(LLMProvider):
                                 break
                             try:
                                 chunk_json = json.loads(data_str)
-                                delta = chunk_json["choices"][0].get("delta", {})
-                                if "content" in delta and delta["content"]:
-                                    yielded_any = True
-                                    yield delta["content"]
+                                choices = chunk_json.get("choices")
+                                if choices and len(choices) > 0:
+                                    delta = choices[0].get("delta", {})
+                                    if "content" in delta and delta["content"]:
+                                        yielded_any = True
+                                        yield delta["content"]
                             except Exception:
                                 pass
 
@@ -388,12 +418,12 @@ class LLMRouter:
 
             except Exception as exc:
                 err_msg = f"{provider.name}: {type(exc).__name__}: {str(exc)[:120]}"
-                logger.warning("Provider %s failed, falling back to next provider — %s", provider.name, err_msg)
+                logger.warning("Provider %s failed, falling back to next provider - %s", provider.name, err_msg)
                 errors.append(err_msg)
                 continue
 
         # If all available providers failed
-        error_details = "\n".join(f"• {e}" for e in errors) if errors else "No valid API keys configured."
+        error_details = "\n".join(f"- {e}" for e in errors) if errors else "No valid API keys configured."
         raise RuntimeError(f"All LLM providers failed:\n{error_details}\n\nPlease verify your API keys or rate limits in Settings.")
 
     async def generate_complete(

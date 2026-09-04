@@ -1,18 +1,43 @@
 // API client — all calls go through Next.js proxy or direct backend URL
 
-import { ApiKeys, Document, Message, Session, Source, MemoryItem, SystemStats } from "./types";
+import { ApiKeys, Document, Message, Session, Source, MemoryItem, SystemStats, KeyStatus, HealthStatus, SharedSession } from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL
   ? `${process.env.NEXT_PUBLIC_BACKEND_URL.replace(/\/+$/, "").replace(/\/api$/, "")}/api`
   : "/api/backend";
 
-function buildHeaders(keys: Partial<ApiKeys>): HeadersInit {
+function getUserHeaders(): Record<string, string> {
+  if (typeof document === "undefined") return {};
+  try {
+    const value = `; ${document.cookie}`;
+    const parts = value.split(`; docmind_user=`);
+    if (parts.length === 2) {
+      const val = parts.pop()?.split(";").shift();
+      if (val) {
+        const user = JSON.parse(decodeURIComponent(val));
+        if (user && user.id) {
+          return {
+            "X-User-Id": user.id,
+            "X-User-Email": user.email || "guest@docmind.local",
+            "X-User-Name": user.name || "Guest User",
+          };
+        }
+      }
+    }
+  } catch {
+    // ignore parsing errors
+  }
+  return {};
+}
+
+function buildHeaders(keys?: Partial<ApiKeys>): Record<string, string> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
+    ...getUserHeaders(),
   };
-  if (keys.gemini) headers["X-Gemini-Key"] = keys.gemini;
-  if (keys.groq) headers["X-Groq-Key"] = keys.groq;
-  if (keys.openrouter) headers["X-OpenRouter-Key"] = keys.openrouter;
+  if (keys?.gemini) headers["X-Gemini-Key"] = keys.gemini;
+  if (keys?.groq) headers["X-Groq-Key"] = keys.groq;
+  if (keys?.openrouter) headers["X-OpenRouter-Key"] = keys.openrouter;
   return headers;
 }
 
@@ -62,12 +87,17 @@ export function parseErrorMessage(err: unknown, fallback: string): string {
   return fallback;
 }
 
-/**
- * Fetch with automatic exponential backoff retry for transient network and 503 errors.
- */
 async function fetchWithRetry(url: string, options?: RequestInit, retries = 2, delayMs = 300): Promise<Response> {
+  const mergedHeaders = {
+    ...getUserHeaders(),
+    ...(options?.headers ? Object.fromEntries(new Headers(options.headers).entries()) : {}),
+  };
+  const finalOptions: RequestInit = {
+    ...options,
+    headers: mergedHeaders,
+  };
   try {
-    const res = await fetch(url, options);
+    const res = await fetch(url, finalOptions);
     if ((res.status === 503 || res.status === 502) && retries > 0) {
       await new Promise((resolve) => setTimeout(resolve, delayMs));
       return fetchWithRetry(url, options, retries - 1, delayMs * 1.5);
@@ -108,16 +138,62 @@ async function handleResponse<T>(res: Response, fallbackError: string): Promise<
   return res.json() as Promise<T>;
 }
 
+// ── Secure API Keys Management ─────────────────────────────────────────────
+
+export async function fetchKeyStatus(): Promise<KeyStatus> {
+  try {
+    const res = await fetch("/api/keys", { cache: "no-store" });
+    if (!res.ok) {
+      return {
+        gemini_configured: false,
+        groq_configured: false,
+        openrouter_configured: false,
+        has_custom_keys: false,
+        has_server_keys: false,
+      };
+    }
+    return await res.json();
+  } catch {
+    return {
+      gemini_configured: false,
+      groq_configured: false,
+      openrouter_configured: false,
+      has_custom_keys: false,
+      has_server_keys: false,
+    };
+  }
+}
+
+export async function saveSecureKeys(keys: Partial<ApiKeys>): Promise<void> {
+  try {
+    const res = await fetch("/api/keys", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(keys),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || "Failed to save secure keys");
+    }
+  } catch (err) {
+    throw new Error(parseErrorMessage(err, "Failed to store API keys securely"));
+  }
+}
+
+export async function clearSecureKeys(): Promise<void> {
+  try {
+    await fetch("/api/keys", { method: "DELETE" });
+  } catch {
+    // ignore
+  }
+}
+
 // ── Health Check ───────────────────────────────────────────────────────────
 
-export async function checkBackendHealth(): Promise<{
-  status: string;
-  neural_models_ready: boolean;
-  service: string;
-}> {
+export async function checkBackendHealth(): Promise<HealthStatus> {
   try {
     const res = await fetchWithRetry(`${API_BASE}/health`, { cache: "no-store" });
-    return await handleResponse(res, "Backend is unreachable. Please verify the backend server is running.");
+    return await handleResponse<HealthStatus>(res, "Backend is unreachable. Please verify the backend server is running.");
   } catch (err) {
     throw new Error(parseErrorMessage(err, "Backend is unreachable. Please verify the backend server is running."));
   }
@@ -165,6 +241,7 @@ export async function deleteSession(sessionId: string): Promise<void> {
     throw new Error(parseErrorMessage(err, "Failed to delete session"));
   }
 }
+
 export async function getMessages(sessionId: string): Promise<Message[]> {
   try {
     const res = await fetchWithRetry(`${API_BASE}/sessions/${sessionId}/messages`);
@@ -173,7 +250,6 @@ export async function getMessages(sessionId: string): Promise<Message[]> {
     throw new Error(parseErrorMessage(err, "Failed to fetch messages"));
   }
 }
-
 
 export async function getStats(): Promise<SystemStats> {
   try {
@@ -204,6 +280,50 @@ export async function deleteAllSessions(): Promise<void> {
     await handleResponse<{ status: string }>(res, "Failed to delete all sessions");
   } catch (err) {
     throw new Error(parseErrorMessage(err, "Failed to delete all sessions"));
+  }
+}
+
+// ── Shareable Chat Links ───────────────────────────────────────────────────
+
+export async function createShareLink(sessionId: string): Promise<{
+  session_id: string;
+  share_token: string;
+  share_url: string;
+  shared_at: string;
+  is_shared: boolean;
+}> {
+  try {
+    const res = await fetchWithRetry(`${API_BASE}/sessions/${sessionId}/share`, {
+      method: "POST",
+    });
+    return await handleResponse(res, "Failed to create share link");
+  } catch (err) {
+    throw new Error(parseErrorMessage(err, "Failed to create share link"));
+  }
+}
+
+export async function revokeShareLink(sessionId: string): Promise<{
+  session_id: string;
+  is_shared: boolean;
+}> {
+  try {
+    const res = await fetchWithRetry(`${API_BASE}/sessions/${sessionId}/share`, {
+      method: "DELETE",
+    });
+    return await handleResponse(res, "Failed to revoke share link");
+  } catch (err) {
+    throw new Error(parseErrorMessage(err, "Failed to revoke share link"));
+  }
+}
+
+export async function getSharedChat(shareToken: string): Promise<SharedSession> {
+  try {
+    const res = await fetchWithRetry(`${API_BASE}/shared/${shareToken}`, {
+      cache: "no-store",
+    });
+    return await handleResponse<SharedSession>(res, "Failed to load shared conversation");
+  } catch (err) {
+    throw new Error(parseErrorMessage(err, "Failed to load shared conversation"));
   }
 }
 
@@ -239,16 +359,16 @@ export async function clearAllMemories(): Promise<void> {
 export async function uploadDocumentToSession(
   sessionId: string,
   file: File,
-  keys: Partial<ApiKeys>
+  keys?: Partial<ApiKeys>
 ): Promise<Document> {
   try {
     const formData = new FormData();
     formData.append("file", file);
 
     const headers: Record<string, string> = {};
-    if (keys.gemini) headers["X-Gemini-Key"] = keys.gemini;
-    if (keys.groq) headers["X-Groq-Key"] = keys.groq;
-    if (keys.openrouter) headers["X-OpenRouter-Key"] = keys.openrouter;
+    if (keys?.gemini) headers["X-Gemini-Key"] = keys.gemini;
+    if (keys?.groq) headers["X-Groq-Key"] = keys.groq;
+    if (keys?.openrouter) headers["X-OpenRouter-Key"] = keys.openrouter;
 
     const res = await fetchWithRetry(`${API_BASE}/sessions/${sessionId}/documents`, {
       method: "POST",
@@ -293,16 +413,11 @@ export interface ChatStreamCallbacks {
 export async function sendMessage(
   sessionId: string,
   message: string,
-  keys: Partial<ApiKeys>,
+  keys: Partial<ApiKeys> | undefined,
   callbacks: ChatStreamCallbacks
 ): Promise<void> {
   try {
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
-    if (keys.gemini) headers["X-Gemini-Key"] = keys.gemini;
-    if (keys.groq) headers["X-Groq-Key"] = keys.groq;
-    if (keys.openrouter) headers["X-OpenRouter-Key"] = keys.openrouter;
+    const headers = buildHeaders(keys);
 
     const res = await fetch(`${API_BASE}/chat`, {
       method: "POST",
@@ -363,14 +478,11 @@ export async function sendMessage(
 
 export async function summarizeSession(
   sessionId: string,
-  keys: Partial<ApiKeys>,
+  keys: Partial<ApiKeys> | undefined,
   callbacks: ChatStreamCallbacks
 ): Promise<void> {
   try {
-    const headers: Record<string, string> = {};
-    if (keys.gemini) headers["X-Gemini-Key"] = keys.gemini;
-    if (keys.groq) headers["X-Groq-Key"] = keys.groq;
-    if (keys.openrouter) headers["X-OpenRouter-Key"] = keys.openrouter;
+    const headers = buildHeaders(keys);
 
     const res = await fetch(`${API_BASE}/sessions/${sessionId}/summarize`, {
       method: "POST",
@@ -425,7 +537,7 @@ export async function summarizeSession(
 
 export async function ingestUrl(sessionId: string, url: string): Promise<Document> {
   try {
-    const res = await fetch(`${API_BASE}/sessions/${sessionId}/url`, {
+    const res = await fetchWithRetry(`${API_BASE}/sessions/${sessionId}/url`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url }),
@@ -442,14 +554,11 @@ export async function compareDocuments(
   sessionId: string,
   docIds: string[],
   focusTopic: string,
-  keys: Partial<ApiKeys>,
+  keys: Partial<ApiKeys> | undefined,
   callbacks: ChatStreamCallbacks
 ): Promise<void> {
   try {
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (keys.gemini) headers["X-Gemini-Key"] = keys.gemini;
-    if (keys.groq) headers["X-Groq-Key"] = keys.groq;
-    if (keys.openrouter) headers["X-OpenRouter-Key"] = keys.openrouter;
+    const headers = buildHeaders(keys);
 
     const res = await fetch(`${API_BASE}/sessions/${sessionId}/compare`, {
       method: "POST",
@@ -512,16 +621,13 @@ export interface QuizQuestion {
 
 export async function generateQuiz(
   sessionId: string,
-  keys: Partial<ApiKeys>,
+  keys?: Partial<ApiKeys>,
   numQuestions: number = 5
 ): Promise<QuizQuestion[]> {
   try {
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (keys.gemini) headers["X-Gemini-Key"] = keys.gemini;
-    if (keys.groq) headers["X-Groq-Key"] = keys.groq;
-    if (keys.openrouter) headers["X-OpenRouter-Key"] = keys.openrouter;
+    const headers = buildHeaders(keys);
 
-    const res = await fetch(`${API_BASE}/sessions/${sessionId}/quiz`, {
+    const res = await fetchWithRetry(`${API_BASE}/sessions/${sessionId}/quiz`, {
       method: "POST",
       headers,
       body: JSON.stringify({ num_questions: numQuestions }),
@@ -536,4 +642,3 @@ export async function generateQuiz(
     throw new Error(parseErrorMessage(err, "Failed to generate quiz"));
   }
 }
-

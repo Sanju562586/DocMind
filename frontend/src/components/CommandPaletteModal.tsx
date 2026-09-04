@@ -17,6 +17,7 @@ import {
   X,
   ArrowRight,
   Sparkles,
+  Share2,
 } from "lucide-react";
 import { Session } from "@/lib/types";
 
@@ -42,6 +43,7 @@ interface CommandPaletteModalProps {
   onOpenMemory: () => void;
   onExport: (format: "pdf" | "markdown" | "json" | "print") => void;
   onOpenSettings: () => void;
+  onOpenShare?: () => void;
 }
 
 export function CommandPaletteModal({
@@ -57,6 +59,7 @@ export function CommandPaletteModal({
   onOpenMemory,
   onExport,
   onOpenSettings,
+  onOpenShare,
 }: CommandPaletteModalProps) {
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -162,6 +165,21 @@ export function CommandPaletteModal({
           onOpenSettings();
         },
       },
+      ...(onOpenShare
+        ? [
+            {
+              id: "action-share",
+              label: "Share Conversation via Public Link",
+              category: "Actions" as const,
+              shortcut: "S",
+              icon: <Share2 size={14} color="#38BDF8" />,
+              perform: () => {
+                onClose();
+                onOpenShare();
+              },
+            },
+          ]
+        : []),
     ],
     [
       onClose,
@@ -173,6 +191,7 @@ export function CommandPaletteModal({
       onOpenMemory,
       onExport,
       onOpenSettings,
+      onOpenShare,
     ]
   );
 

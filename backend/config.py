@@ -6,8 +6,9 @@ from functools import lru_cache
 class Settings(BaseSettings):
     app_name: str = "DocMind Document Intelligence"
 
-    # Storage paths
+    # Storage & Database configuration
     database_path: str = "./data/summarizer.db"
+    database_url: Optional[str] = None  # e.g., postgresql://user:password@localhost:5432/docmind
     upload_dir: str = "./data/uploads"
     index_dir: str = "./data/indexes"
 
@@ -36,9 +37,43 @@ class Settings(BaseSettings):
     # Upload limits
     max_file_size_bytes: int = 52_428_800  # 50 MB
 
-    # Rate limiting strings (slowapi format)
+    # Upstash Redis & Rate Limiting
+    upstash_redis_rest_url: Optional[str] = None
+    upstash_redis_rest_token: Optional[str] = None
+    redis_url: Optional[str] = None
+
+    # Rate limiting strings
     rate_limit_chat: str = "20/minute"
+    rate_limit_upload: str = "10/minute"
     rate_limit_summarize: str = "10/minute"
+    rate_limit_compare: str = "10/minute"
+    rate_limit_quiz: str = "15/minute"
+    rate_limit_url: str = "10/minute"
+
+    # Authentication & Session Security
+    auth_secret: str = "docmind_jwt_secret_dev_key_change_in_production"
+    jwt_algorithm: str = "HS256"
+    jwt_expire_minutes: int = 43200  # 30 days
+    google_client_id: Optional[str] = None
+    google_client_secret: Optional[str] = None
+    github_client_id: Optional[str] = None
+    github_client_secret: Optional[str] = None
+
+    # Storage backend configuration
+    storage_backend: str = "local"  # "local" or "s3"
+    s3_endpoint_url: Optional[str] = None
+    s3_bucket_name: Optional[str] = None
+    s3_access_key: Optional[str] = None
+    s3_secret_key: Optional[str] = None
+    s3_region: str = "us-east-1"
+
+    # Async task worker queue settings
+    max_async_workers: int = 4
+    task_queue_max_size: int = 100
+
+    # Observability & Metrics
+    enable_metrics: bool = True
+    log_format: str = "text"  # "text" or "json"
 
     # Chunking config
     parent_chunk_size: int = 512      # tokens

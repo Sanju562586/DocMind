@@ -4,6 +4,9 @@ uvicorn[standard]==0.30.6
 python-multipart==0.0.9
 aiofiles==24.1.0
 
+# Database
+psycopg2-binary==2.9.12
+
 # Rate limiting
 slowapi==0.1.9
 limits==3.13.0

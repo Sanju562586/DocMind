@@ -1,14 +1,48 @@
 """
-Multi-format document parser.
+Multi-format document parser with server-side MIME verification, input sanitization, and security checks.
 Supports: PDF, DOCX, TXT, MD, HTML, CSV, XLSX, PNG, JPG, JPEG, BMP, TIFF, and Web URLs
 """
 
 import os
 import re
+import io
+import zipfile
 import logging
-from typing import Tuple, Dict, Any
+import socket
+import ipaddress
+from urllib.parse import urlparse
+from typing import Tuple, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def is_safe_url(url: str) -> bool:
+    """Validate that a URL does not resolve to loopback, private, or cloud metadata addresses."""
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return False
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+        if hostname.lower() in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+            return False
+        addr_info = socket.getaddrinfo(hostname, None)
+        for entry in addr_info:
+            ip_str = entry[4][0]
+            ip = ipaddress.ip_address(ip_str)
+            if (
+                ip.is_loopback
+                or ip.is_private
+                or ip.is_link_local
+                or ip.is_reserved
+                or ip.is_multicast
+                or str(ip) in ("169.254.169.254", "0.0.0.0", "255.255.255.255")
+            ):
+                return False
+        return True
+    except Exception:
+        return False
 
 
 class DocumentParser:
@@ -16,6 +50,132 @@ class DocumentParser:
         ".pdf", ".docx", ".txt", ".md", ".html", ".htm",
         ".csv", ".xlsx", ".png", ".jpg", ".jpeg", ".bmp", ".tiff"
     }
+
+    # ──────────────────────────────────────────────
+    # Server-Side Input Sanitization & Verification
+    # ──────────────────────────────────────────────
+
+    @classmethod
+    def sanitize_filename(cls, raw_filename: str) -> str:
+        """Sanitize raw filenames to prevent path traversal and shell injection."""
+        base = os.path.basename(raw_filename or "document.txt")
+        # Remove null bytes and path separators
+        base = base.replace("\x00", "").replace("/", "").replace("\\", "")
+        # Replace non-safe characters with underscore
+        clean = re.sub(r"[^\w.\-]", "_", base)
+        # Collapse multiple dots or underscores
+        clean = re.sub(r"\.{2,}", ".", clean)
+        clean = re.sub(r"_{2,}", "_", clean)
+        # Prevent hidden files
+        if clean.startswith("."):
+            clean = f"upload_{clean}"
+        if not clean or clean == "_":
+            clean = "upload_document.txt"
+        # Truncate to reasonable length (100 chars) while preserving extension
+        if len(clean) > 100:
+            name, ext = os.path.splitext(clean)
+            clean = f"{name[:90]}{ext}"
+        return clean
+
+    @classmethod
+    def validate_upload(
+        cls,
+        file_bytes: bytes,
+        raw_filename: str,
+        max_size_bytes: int = 52_428_800
+    ) -> Tuple[str, str]:
+        """
+        Server-side validation:
+        1. Checks file size
+        2. Sanitizes filename
+        3. Verifies file extension is supported
+        4. Verifies actual binary magic bytes / MIME signatures
+        5. Protects against zip bombs, executable headers, and malicious payloads
+        Returns: (clean_filename, extension)
+        """
+        # 1. Size verification
+        if not file_bytes or len(file_bytes) == 0:
+            raise ValueError("Uploaded file is empty (0 bytes).")
+        if len(file_bytes) > max_size_bytes:
+            max_mb = max_size_bytes / (1024 * 1024)
+            actual_mb = len(file_bytes) / (1024 * 1024)
+            raise ValueError(f"File size ({actual_mb:.1f} MB) exceeds maximum allowed limit of {max_mb:.0f} MB.")
+
+        # 2. Filename sanitization
+        clean_filename = cls.sanitize_filename(raw_filename)
+        ext = os.path.splitext(clean_filename)[1].lower()
+
+        # 3. Extension check
+        if ext not in cls.SUPPORTED_TYPES:
+            raise ValueError(
+                f"Unsupported file type '{ext}'. Supported formats: {', '.join(sorted(cls.SUPPORTED_TYPES))}"
+            )
+
+        # 4. Binary signature (magic bytes) verification
+        if ext == ".pdf":
+            # PDF must contain %PDF- near beginning
+            if not file_bytes.startswith(b"%PDF-") and b"%PDF-" not in file_bytes[:1024]:
+                raise ValueError("File failed MIME verification: Invalid PDF header signature.")
+
+        elif ext == ".docx":
+            if not file_bytes.startswith(b"PK\x03\x04"):
+                raise ValueError("File failed MIME verification: Invalid DOCX signature.")
+            try:
+                with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+                    namelist = zf.namelist()
+                    if not any("word/document.xml" in n or "[Content_Types].xml" in n for n in namelist):
+                        raise ValueError("File failed verification: Corrupted or invalid Word DOCX package.")
+                    # Decompression bomb prevention
+                    total_uncompressed = sum(info.file_size for info in zf.infolist())
+                    if total_uncompressed > max_size_bytes * 10:
+                        raise ValueError("File rejected: Suspected decompression bomb in DOCX.")
+            except zipfile.BadZipFile:
+                raise ValueError("File failed verification: Corrupted ZIP/DOCX archive.")
+
+        elif ext == ".xlsx":
+            if not file_bytes.startswith(b"PK\x03\x04"):
+                raise ValueError("File failed MIME verification: Invalid XLSX signature.")
+            try:
+                with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+                    namelist = zf.namelist()
+                    if not any("xl/workbook.xml" in n or "[Content_Types].xml" in n for n in namelist):
+                        raise ValueError("File failed verification: Corrupted or invalid Excel XLSX package.")
+                    total_uncompressed = sum(info.file_size for info in zf.infolist())
+                    if total_uncompressed > max_size_bytes * 10:
+                        raise ValueError("File rejected: Suspected decompression bomb in XLSX.")
+            except zipfile.BadZipFile:
+                raise ValueError("File failed verification: Corrupted ZIP/XLSX archive.")
+
+        elif ext in (".png",):
+            if not file_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+                raise ValueError("File failed MIME verification: Invalid PNG signature.")
+
+        elif ext in (".jpg", ".jpeg"):
+            if not file_bytes.startswith(b"\xff\xd8\xff"):
+                raise ValueError("File failed MIME verification: Invalid JPEG signature.")
+
+        elif ext == ".bmp":
+            if not file_bytes.startswith(b"BM"):
+                raise ValueError("File failed MIME verification: Invalid BMP signature.")
+
+        elif ext == ".tiff":
+            if not (file_bytes.startswith(b"II*\x00") or file_bytes.startswith(b"MM\x00*")):
+                raise ValueError("File failed MIME verification: Invalid TIFF signature.")
+
+        elif ext in (".txt", ".md", ".csv", ".html", ".htm"):
+            # Check for executable headers (Windows PE / Linux ELF / Mach-O / Java Class)
+            if file_bytes.startswith(b"MZ") or file_bytes.startswith(b"\x7fELF") or file_bytes.startswith(b"\xca\xfe\xba\xbe"):
+                raise ValueError("Executable binary files cannot be uploaded as plain text.")
+            # Check for excessive null bytes (indicative of binary/compiled payload)
+            null_count = file_bytes[:4096].count(b"\x00")
+            if null_count > 10:
+                raise ValueError("File appears to be a binary executable, not valid plain text.")
+
+        return clean_filename, ext
+
+    # ──────────────────────────────────────────────
+    # Parser Entrypoints
+    # ──────────────────────────────────────────────
 
     def parse(self, file_path: str, filename: str) -> Tuple[str, Dict[str, Any]]:
         """
@@ -49,10 +209,17 @@ class DocumentParser:
 
     def parse_url(self, url: str) -> Tuple[str, Dict[str, Any]]:
         """
-        Fetch and parse a public Web URL.
+        Fetch and parse a public Web URL safely.
         """
         import urllib.request
         from bs4 import BeautifulSoup
+
+        # Enforce HTTP/HTTPS only
+        if not url.startswith("http://") and not url.startswith("https://"):
+            raise ValueError("URL must start with http:// or https://")
+
+        if not is_safe_url(url):
+            raise ValueError("Access to local, private, or loopback network addresses is prohibited.")
 
         req = urllib.request.Request(
             url,
@@ -61,12 +228,14 @@ class DocumentParser:
 
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
-                html = resp.read().decode("utf-8", errors="ignore")
+                # Limit URL response size to 10 MB
+                html = resp.read(10_485_760).decode("utf-8", errors="ignore")
         except Exception as exc:
             raise ValueError(f"Failed to fetch URL '{url}': {exc}")
 
         soup = BeautifulSoup(html, "html.parser")
-        for tag in soup(["script", "style", "nav", "footer", "header", "aside", "noscript"]):
+        # Sanitize HTML tags completely
+        for tag in soup(["script", "style", "nav", "footer", "header", "aside", "noscript", "iframe", "object", "embed"]):
             tag.decompose()
 
         title = soup.title.string.strip() if soup.title and soup.title.string else url
@@ -97,7 +266,7 @@ class DocumentParser:
         return full_text, metadata
 
     # ──────────────────────────────────────────────
-    # Parsers
+    # Specific Parsers
     # ──────────────────────────────────────────────
 
     def _parse_pdf(self, path: str, filename: str) -> Tuple[str, Dict]:
@@ -116,7 +285,11 @@ class DocumentParser:
 
             # If no extractable text, attempt OCR fallback on PDF pages
             if not full_text or len(full_text.split()) < 10:
-                full_text = self._ocr_pdf_pages(doc, filename)
+                ocr_text = self._ocr_pdf_pages(doc, filename)
+                if ocr_text and not ocr_text.startswith("(Document '"):
+                    full_text = ocr_text
+                elif not full_text:
+                    full_text = ocr_text
 
             metadata = {
                 "title": doc.metadata.get("title") or filename,
@@ -134,7 +307,6 @@ class DocumentParser:
         try:
             import pytesseract
             from PIL import Image
-            import io
 
             ocr_pages = []
             for i, page in enumerate(doc, 1):
@@ -184,8 +356,9 @@ class DocumentParser:
         sections = []
 
         for para in doc.paragraphs:
-            if para.style.name.startswith("Heading"):
-                level = para.style.name.split()[-1]
+            style_name = getattr(para.style, "name", "") or ""
+            if style_name.startswith("Heading"):
+                level = style_name.split()[-1]
                 prefix = "#" * int(level) if level.isdigit() else "##"
                 sections.append(f"{prefix} {para.text.strip()}")
             elif para.text.strip():
@@ -247,7 +420,8 @@ class DocumentParser:
 
         soup = BeautifulSoup(html, "html.parser")
 
-        for tag in soup(["script", "style", "nav", "footer", "header"]):
+        # Strip scripts, styles, iframes, objects
+        for tag in soup(["script", "style", "nav", "footer", "header", "iframe", "object", "embed", "noscript"]):
             tag.decompose()
 
         title = soup.title.string if soup.title else filename
@@ -287,11 +461,18 @@ class DocumentParser:
         except UnicodeDecodeError:
             df = pd.read_csv(path, encoding="latin-1", nrows=5000)
 
+        # Sanitize CSV formula injection for preview
+        def sanitize_cell(v: Any) -> str:
+            s = str(v)
+            if s.startswith(("=", "+", "-", "@", "\t", "\r")):
+                return "'" + s
+            return s
+
         display_df = df.head(500)
-        rows = [" | ".join(str(v) for v in display_df.columns)]
+        rows = [" | ".join(sanitize_cell(v) for v in display_df.columns)]
         rows.append("-" * len(rows[0]))
         for _, row in display_df.iterrows():
-            rows.append(" | ".join(str(v) for v in row.values))
+            rows.append(" | ".join(sanitize_cell(v) for v in row.values))
 
         data_text = "\n".join(rows)
         try:
@@ -316,15 +497,21 @@ class DocumentParser:
     def _parse_xlsx(self, path: str, filename: str) -> Tuple[str, Dict]:
         import pandas as pd
 
+        def sanitize_cell(v: Any) -> str:
+            s = str(v) if v is not None else ""
+            if s.startswith(("=", "+", "-", "@", "\t", "\r")):
+                return "'" + s
+            return s
+
         xls = pd.ExcelFile(path)
         try:
             parts = []
             for sheet_name in xls.sheet_names[:10]:
                 df = pd.read_excel(xls, sheet_name=sheet_name, nrows=500)
-                rows = [" | ".join(str(v) for v in df.columns)]
+                rows = [" | ".join(sanitize_cell(v) for v in df.columns)]
                 rows.append("-" * len(rows[0]))
                 for _, row in df.iterrows():
-                    rows.append(" | ".join(str(v) for v in row.values))
+                    rows.append(" | ".join(sanitize_cell(v) for v in row.values))
                 parts.append(f"## Sheet: {sheet_name}\n\n" + "\n".join(rows))
 
             full_text = f"# Excel File: {filename}\n\n" + "\n\n".join(parts)
@@ -353,5 +540,3 @@ class DocumentParser:
         text = re.sub(r"\n{3,}", "\n\n", text)
         text = text.replace("\x00", "")
         return text.strip()
-
-

@@ -88,8 +88,8 @@ export function preprocessMarkdown(content: string): string {
   // 12. LaTeX math conversions & syntax cleanup
   processed = processed.replace(/\\\[([\s\S]*?)\\\]/g, (_, math) => `\n\n$$\n${math.trim()}\n$$\n\n`);
   processed = processed.replace(/\\\(([\s\S]*?)\\\)/g, (_, math) => `$${math.trim()}$`);
-  processed = processed.replace(/(?<=^|[\s(])\$(?!\$)([^$\n]+?)\$\$(?=[\s.,!?;:)\]]|$)/gm, "$$$1$$");
-  processed = processed.replace(/(?<=^|[\s(])\$\$(?!\$)([^$\n]+?)\$(?=[\s.,!?;:)\]]|$)/gm, "$$$1$$");
+  processed = processed.replace(/(?<=^|[\s(])\$(?!\$)([^$\n]+?)\$\$(?=[\s.,!?;:)\]]|$)/gm, (_, math) => `$$${math}$$`);
+  processed = processed.replace(/(?<=^|[\s(])\$\$(?!\$)([^$\n]+?)\$(?=[\s.,!?;:)\]]|$)/gm, (_, math) => `$$${math}$$`);
   processed = processed.replace(/^[ \t]*\$\$([^\n$]+?)\$\$[ \t]*$/gm, (_, math) => `\n$$\n${math.trim()}\n$$\n`);
 
   // 13. Collapse 3+ consecutive newlines into 2 newlines

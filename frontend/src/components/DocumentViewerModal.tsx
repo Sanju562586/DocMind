@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Document } from "@/lib/types";
 
 interface DocumentViewerModalProps {
@@ -17,6 +17,10 @@ export function DocumentViewerModal({
   pageNumber = 1,
 }: DocumentViewerModalProps) {
   const [activePage, setActivePage] = useState(pageNumber);
+
+  useEffect(() => {
+    setActivePage(pageNumber);
+  }, [pageNumber]);
 
   if (!isOpen || !document) return null;
 

@@ -23,6 +23,7 @@ import {
   Download,
   Edit3,
   X,
+  Share2,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import Sidebar from "@/components/Sidebar";
@@ -31,6 +32,7 @@ import EmptyState from "@/components/EmptyState";
 import { ApiKeyModal, DocumentUploadModal } from "@/components/Modals";
 import { GlobalMemoryModal } from "@/components/GlobalMemoryModal";
 import { PipelineModal } from "@/components/PipelineModal";
+import { ShareModal } from "@/components/ShareModal";
 import KeyboardShortcutsModal from "@/components/KeyboardShortcutsModal";
 import InteractiveBackground from "@/components/InteractiveBackground";
 import { QuizModal } from "@/components/QuizModal";
@@ -56,33 +58,21 @@ import {
   listAllMemories,
   deleteMemoryItem,
   clearAllMemories,
+  saveSecureKeys,
   QuizQuestion,
 } from "@/lib/api";
 import { exportSessionToPdf } from "@/lib/pdfExporter";
 import { ApiKeys, Document, Message, Session, Source, MemoryItem } from "@/lib/types";
+import { AuthModal } from "@/components/AuthModal";
+import { useAuth } from "@/lib/auth";
 
-function loadKeys(): ApiKeys {
-  if (typeof window === "undefined") return { gemini: "", groq: "", openrouter: "" };
+function purgeLegacyPlaintextKeys() {
+  if (typeof window === "undefined") return;
   try {
-    const sessionVal = sessionStorage.getItem("docmind_api_keys");
-    if (sessionVal) return JSON.parse(sessionVal);
-    const localVal = localStorage.getItem("docmind_api_keys");
-    if (localVal) return JSON.parse(localVal);
-    return { gemini: "", groq: "", openrouter: "" };
+    sessionStorage.removeItem("docmind_api_keys");
+    localStorage.removeItem("docmind_api_keys");
   } catch {
-    return { gemini: "", groq: "", openrouter: "" };
-  }
-}
-
-function saveKeys(keys: ApiKeys) {
-  if (typeof window !== "undefined") {
-    try {
-      const serialized = JSON.stringify(keys);
-      sessionStorage.setItem("docmind_api_keys", serialized);
-      localStorage.setItem("docmind_api_keys", serialized);
-    } catch (e) {
-      console.warn("Storage quota or access issue:", e);
-    }
+    // ignore
   }
 }
 
@@ -106,6 +96,7 @@ function saveSidebarState(isOpen: boolean) {
 type ModalType = "none" | "upload" | "settings" | "memory" | "pipeline" | "shortcuts";
 
 export default function HomePage() {
+  const { user } = useAuth();
   const [apiKeys, setApiKeys] = useState<ApiKeys>({ gemini: "", groq: "", openrouter: "" });
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSession, setActiveSession] = useState<Session | null>(null);
@@ -118,7 +109,7 @@ export default function HomePage() {
   const [modal, setModal] = useState<ModalType>("none");
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
   const [error, setError] = useState("");
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [toasts, setToasts] = useState<Array<{ id: string; message: string; type?: "info" | "success" | "error" }>>([]);
   const [deletingDocId, setDeletingDocId] = useState<string | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [backendStatus, setBackendStatus] = useState<"healthy" | "unreachable" | "checking">("checking");
@@ -157,6 +148,7 @@ export default function HomePage() {
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [isChatSearchOpen, setIsChatSearchOpen] = useState(false);
   const [chatSearchQuery, setChatSearchQuery] = useState("");
+  const [isShareModalOpen, setIsShareModalOpen] = useState(false);
 
   // Handler functions for upgrade tools
   const handleOpenQuiz = async () => {
@@ -318,7 +310,10 @@ export default function HomePage() {
 
   const handleOpenCitation = (docId?: string, pageNum?: number) => {
     if (!activeSession) return;
-    const doc = activeSession.documents.find((d) => d.doc_id === docId) || activeSession.documents[0];
+    const doc =
+      activeSession.documents?.find((d) => d.doc_id === docId || (d as any).id === docId) ||
+      sessions.flatMap((s) => s.documents || []).find((d) => d.doc_id === docId || (d as any).id === docId) ||
+      activeSession.documents?.[0];
     if (doc) {
       setViewerDoc(doc);
       setViewerPage(pageNum || 1);
@@ -326,16 +321,21 @@ export default function HomePage() {
     }
   };
 
-  const showToast = (msg: string) => {
-    setToastMessage(msg);
+  const showToast = useCallback((msg: string, type: "info" | "success" | "error" = "info") => {
+    const id = `toast-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+    setToasts((prev) => [...prev.slice(-3), { id, message: msg, type }]);
     setTimeout(() => {
-      setToastMessage((current) => (current === msg ? null : current));
+      setToasts((prev) => prev.filter((t) => t.id !== id));
     }, 4500);
-  };
+  }, []);
+
+  const removeToast = useCallback((id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
 
   // ── Load initial data & keyboard shortcuts ──────────────────────────────────
   useEffect(() => {
-    setApiKeys(loadKeys());
+    purgeLegacyPlaintextKeys();
     setIsSidebarOpen(loadSidebarState());
     loadSessionsList();
     verifyHealth();
@@ -385,6 +385,15 @@ export default function HomePage() {
     }, 10000);
     return () => clearInterval(interval);
   }, [backendStatus]);
+
+  // ── Sync user-isolated sessions when identity changes ──────────────────────
+  useEffect(() => {
+    if (user?.id) {
+      loadSessionsList();
+      setActiveSession(null);
+      setMessages([]);
+    }
+  }, [user?.id]);
 
   const toggleSidebar = () => {
     setIsSidebarOpen((prev) => {
@@ -500,6 +509,29 @@ export default function HomePage() {
     }
   };
 
+  const handleOpenUploadModal = async () => {
+    let session = activeSession;
+    if (!session) {
+      try {
+        const newId = await createSession("New Conversation");
+        const updatedList = await listSessions();
+        setSessions(updatedList);
+        session = updatedList.find((s) => s.id === newId) || {
+          id: newId,
+          title: "New Conversation",
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          documents: [],
+          message_count: 0,
+        };
+        setActiveSession(session);
+      } catch (err) {
+        console.warn("Failed to create session for upload:", err);
+      }
+    }
+    setModal("upload");
+  };
+
   // ── Start with Prompt Spark ─────────────────────────────────────────────────
   const handleStartWithPrompt = async (promptText: string) => {
     let session = activeSession;
@@ -524,11 +556,6 @@ export default function HomePage() {
   const handleSend = async (overrideText?: string | React.MouseEvent) => {
     const text = (typeof overrideText === "string" ? overrideText : inputValue).trim();
     if (!text || isStreaming) return;
-
-    if (!apiKeys.gemini && !apiKeys.groq && !apiKeys.openrouter) {
-      setModal("settings");
-      return;
-    }
 
     let session = activeSession;
     if (!session) {
@@ -603,6 +630,9 @@ export default function HomePage() {
           setStreamingContent("");
           setStreamingMemories([]);
           setError(errMsg);
+          if (errMsg.toLowerCase().includes("no api key") || errMsg.toLowerCase().includes("api keys")) {
+            setModal("settings");
+          }
         },
       });
     } catch (err) {
@@ -621,11 +651,6 @@ export default function HomePage() {
     if (!activeSession || isStreaming) return;
     if (!activeSession.documents || activeSession.documents.length === 0) {
       setError("Please attach at least one document to this chat before summarizing.");
-      return;
-    }
-
-    if (!apiKeys.gemini && !apiKeys.groq && !apiKeys.openrouter) {
-      setModal("settings");
       return;
     }
 
@@ -791,14 +816,14 @@ export default function HomePage() {
   useEffect(() => {
     if (!activeSession) return;
     const hasProcessing = activeSession.documents?.some(
-      (d) => d.status === "processing" || d.chunk_count === 0
+      (d) => d.status === "processing"
     );
     if (!hasProcessing) return;
 
     const interval = setInterval(async () => {
       try {
         const docs = await listSessionDocuments(activeSession.id);
-        const stillProcessing = docs.some((d) => d.status === "processing" || d.chunk_count === 0);
+        const stillProcessing = docs.some((d) => d.status === "processing");
         setActiveSession((prev) => {
           if (!prev || prev.id !== activeSession.id) return prev;
           return { ...prev, documents: docs };
@@ -818,20 +843,22 @@ export default function HomePage() {
   }, [activeSession?.id, activeSession?.documents]);
 
   // ── Delete Document ─────────────────────────────────────────────────────────
-  const handleDeleteDoc = async (docId: string) => {
+  const handleDeleteDocument = async (docId: string) => {
     if (!activeSession) return;
     setDeletingDocId(docId);
     try {
       await deleteDocument(docId);
-      const remainingDocs = (activeSession.documents || []).filter((d) => d.doc_id !== docId);
-      const updatedSession = { ...activeSession, documents: remainingDocs };
+      const updatedDocs = (activeSession.documents || []).filter(
+        (d) => d.doc_id !== docId && (d as any).id !== docId
+      );
+      const updatedSession = { ...activeSession, documents: updatedDocs };
       setActiveSession(updatedSession);
       setSessions((prev) =>
         prev.map((s) => (s.id === activeSession.id ? updatedSession : s))
       );
-      showToast("Document removed from conversation");
+      showToast("Document deleted");
     } catch (err) {
-      setError("Failed to delete document");
+      showToast(err instanceof Error ? err.message : "Failed to delete document");
     } finally {
       setDeletingDocId(null);
     }
@@ -846,7 +873,7 @@ export default function HomePage() {
 
   const handleSaveKeys = (keys: ApiKeys) => {
     setApiKeys(keys);
-    saveKeys(keys);
+    saveSecureKeys(keys).catch((err) => console.warn("Failed to persist secure keys:", err));
     showToast("Multi-LLM API Keys updated");
   };
 
@@ -1086,6 +1113,19 @@ export default function HomePage() {
                 </motion.button>
               )}
 
+              {hasSession && (
+                <motion.button
+                  className="topbar-action-btn"
+                  onClick={() => setIsShareModalOpen(true)}
+                  whileHover={{ scale: 1.04 }}
+                  whileTap={{ scale: 0.95 }}
+                  title="Share conversation transcript via public link"
+                >
+                  <Share2 size={13.5} />
+                  <span className="hide-on-tablet">Share</span>
+                </motion.button>
+              )}
+
               <motion.button
                 className="topbar-action-btn"
                 onClick={() => setModal("pipeline")}
@@ -1225,7 +1265,7 @@ export default function HomePage() {
                           <motion.button
                             className="icon-btn"
                             style={{ width: 18, height: 18, marginLeft: 2 }}
-                            onClick={() => handleDeleteDoc(d.doc_id)}
+                            onClick={() => handleDeleteDocument(d.doc_id)}
                             disabled={deletingDocId === d.doc_id}
                             title="Remove document from this chat"
                             whileHover={{ scale: 1.25 }}
@@ -1245,7 +1285,7 @@ export default function HomePage() {
                   <motion.button
                     className="btn btn-outline"
                     style={{ padding: "4px 10px", fontSize: 11 }}
-                    onClick={() => setModal("upload")}
+                    onClick={handleOpenUploadModal}
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                   >
@@ -1320,7 +1360,7 @@ export default function HomePage() {
                       </p>
                       <motion.button
                         className="btn btn-primary"
-                        onClick={() => setModal("upload")}
+                        onClick={handleOpenUploadModal}
                         whileHover={{ scale: 1.04, y: -2 }}
                         whileTap={{ scale: 0.95 }}
                       >
@@ -1409,7 +1449,7 @@ export default function HomePage() {
                   <div className="input-box-wrapper">
                     <motion.button
                       className="input-action-btn"
-                      onClick={() => setModal("upload")}
+                      onClick={handleOpenUploadModal}
                       title="Attach document to this conversation"
                       disabled={isStreaming}
                       whileHover={{ scale: 1.15 }}
@@ -1545,7 +1585,7 @@ export default function HomePage() {
             activeSession={activeSession}
             sessions={sessions}
             onSelectSession={handleSelectSession}
-            onOpenUpload={() => setModal("upload")}
+            onOpenUpload={handleOpenUploadModal}
             onGenerateQuiz={handleGenerateQuiz}
             questions={quizQuestions}
             isLoading={isQuizLoading}
@@ -1560,7 +1600,7 @@ export default function HomePage() {
             onClose={() => setIsCompareOpen(false)}
             activeSession={activeSession}
             sessions={sessions}
-            onOpenUpload={() => setModal("upload")}
+            onOpenUpload={handleOpenUploadModal}
             onStartComparison={handleStartComparison}
             isLoading={isCompareLoading}
             resultMarkdown={compareResult}
@@ -1602,60 +1642,101 @@ export default function HomePage() {
             onOpenQuiz={() => handleOpenQuiz()}
             onOpenCompare={() => setIsCompareOpen(true)}
             onOpenUrlIngest={() => setIsUrlModalOpen(true)}
-            onOpenUpload={() => setModal("upload")}
+            onOpenUpload={handleOpenUploadModal}
             onOpenMemory={() => setModal("memory")}
             onExport={handleExportChat}
             onOpenSettings={() => setModal("settings")}
+            onOpenShare={hasSession ? () => setIsShareModalOpen(true) : undefined}
           />
         )}
       </AnimatePresence>
 
-      {/* Global Toast Notification */}
+      {/* Share Modal */}
       <AnimatePresence>
-        {toastMessage && (
-          <motion.div
-            initial={{ opacity: 0, y: -20, scale: 0.95 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: -20, scale: 0.95 }}
-            transition={{ type: "spring", stiffness: 450, damping: 28 }}
-            style={{
-              position: "fixed",
-              top: 24,
-              right: 24,
-              zIndex: 9999,
-              background: "#0E0E0E",
-              border: "1px solid rgba(255, 255, 255, 0.4)",
-              borderRadius: "var(--radius-md)",
-              padding: "10px 18px",
-              display: "flex",
-              alignItems: "center",
-              gap: 10,
-              boxShadow: "0 10px 30px rgba(0, 0, 0, 0.95), 0 0 15px rgba(255, 255, 255, 0.15)",
-              backdropFilter: "blur(20px)",
-              color: "#FFFFFF",
-              fontSize: 13,
-              fontWeight: 600,
+        {isShareModalOpen && (
+          <ShareModal
+            isOpen={isShareModalOpen}
+            onClose={() => setIsShareModalOpen(false)}
+            session={activeSession}
+            onSessionUpdated={(updated) => {
+              if (activeSession) {
+                const upd = { ...activeSession, ...updated };
+                setActiveSession(upd);
+                setSessions((prev) => prev.map((s) => (s.id === upd.id ? upd : s)));
+              }
             }}
-          >
-            <CheckCircle2 size={16} color="#FFFFFF" />
-            <span>{toastMessage}</span>
-            <button
-              onClick={() => setToastMessage(null)}
-              style={{
-                background: "none",
-                border: "none",
-                color: "var(--text-muted-alt)",
-                cursor: "pointer",
-                marginLeft: 8,
-                padding: 2,
-                fontSize: 13,
-              }}
-            >
-              ✕
-            </button>
-          </motion.div>
+          />
         )}
       </AnimatePresence>
+
+      {/* Multi-Toast Notification System */}
+      <div
+        style={{
+          position: "fixed",
+          bottom: 24,
+          right: 24,
+          zIndex: 9999,
+          display: "flex",
+          flexDirection: "column",
+          gap: 8,
+          pointerEvents: "none",
+        }}
+      >
+        <AnimatePresence>
+          {toasts.map((t) => (
+            <motion.div
+              key={t.id}
+              initial={{ opacity: 0, y: 16, scale: 0.95 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 16, scale: 0.95 }}
+              transition={{ type: "spring", stiffness: 450, damping: 26 }}
+              style={{
+                pointerEvents: "auto",
+                padding: "10px 16px",
+                background: "#0C0C0E",
+                border: t.type === "error"
+                  ? "1px solid rgba(239, 68, 68, 0.45)"
+                  : t.type === "success"
+                  ? "1px solid rgba(34, 197, 94, 0.45)"
+                  : "1px solid rgba(255, 255, 255, 0.25)",
+                borderRadius: "var(--radius-md)",
+                color: "#FFFFFF",
+                fontSize: 12.5,
+                fontWeight: 600,
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                boxShadow: "0 12px 36px rgba(0, 0, 0, 0.9), 0 0 1px rgba(255, 255, 255, 0.15)",
+                backdropFilter: "blur(20px)",
+                maxWidth: 360,
+              }}
+            >
+              {t.type === "error" ? (
+                <span style={{ color: "#EF4444", fontSize: 14 }}>⚠️</span>
+              ) : t.type === "success" ? (
+                <CheckCircle2 size={15} color="#22C55E" />
+              ) : (
+                <CheckCircle2 size={15} color="#FFFFFF" />
+              )}
+              <span style={{ flex: 1, wordBreak: "break-word" }}>{t.message}</span>
+              <button
+                onClick={() => removeToast(t.id)}
+                style={{
+                  background: "none",
+                  border: "none",
+                  color: "var(--text-muted-alt)",
+                  cursor: "pointer",
+                  marginLeft: 6,
+                  padding: 2,
+                  fontSize: 12,
+                }}
+              >
+                ✕
+              </button>
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
 
       {/* Full-Screen Drag & Drop Overlay */}
       <AnimatePresence>
@@ -1708,6 +1789,9 @@ export default function HomePage() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* User Authentication & Profile Modal */}
+      <AuthModal />
     </>
   );
 }

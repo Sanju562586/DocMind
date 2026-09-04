@@ -61,6 +61,8 @@ export const viewport: Viewport = {
   colorScheme: "dark",
 };
 
+import { AuthProvider } from "@/lib/auth";
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -78,7 +80,9 @@ export default function RootLayout({
         <meta name="apple-mobile-web-app-title" content="DocMind AI" />
         <meta name="format-detection" content="telephone=no" />
       </head>
-      <body>{children}</body>
+      <body>
+        <AuthProvider>{children}</AuthProvider>
+      </body>
     </html>
   );
 }

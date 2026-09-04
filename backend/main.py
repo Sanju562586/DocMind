@@ -1,5 +1,5 @@
 """
-FastAPI Application — DocMind Document Summarizer & Global Memory System
+FastAPI Application — DocMind Document Summarizer, User Isolation & Security Suite
 """
 
 import asyncio
@@ -17,10 +17,11 @@ backend_dir = os.path.dirname(os.path.abspath(__file__))
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
+import time
 import aiofiles
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, Query, BackgroundTasks, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, Response
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -36,6 +37,11 @@ from models import (
 )
 from retrieval import HybridRetriever
 from session_store import SessionStore
+from rate_limiter import UpstashRateLimiter
+from auth import extract_user_identity
+from storage import get_storage_backend, StorageBackend
+from task_queue import AsyncTaskQueue
+from metrics import metrics
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("docmind")
@@ -47,18 +53,28 @@ chunker: Optional[HierarchicalSemanticChunker] = None
 retriever: Optional[HybridRetriever] = None
 store: Optional[SessionStore] = None
 router_llm: Optional[LLMRouter] = None
+rate_limiter: Optional[UpstashRateLimiter] = None
+storage: Optional[StorageBackend] = None
+task_queue: Optional[AsyncTaskQueue] = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global parser, chunker, retriever, store, router_llm
+    global parser, chunker, retriever, store, router_llm, rate_limiter, storage, task_queue
 
     os.makedirs(settings.upload_dir, exist_ok=True)
     os.makedirs(settings.index_dir, exist_ok=True)
 
     logger.info("Initializing DocMind production backend components...")
-    store = SessionStore(db_path=settings.database_path)
+    store = SessionStore(db_path=settings.database_path, database_url=settings.database_url)
     store.initialize()
+
+    storage = get_storage_backend(settings)
+    task_queue = AsyncTaskQueue(
+        max_workers=settings.max_async_workers,
+        max_queue_size=settings.task_queue_max_size,
+    )
+    await task_queue.start()
 
     parser = DocumentParser()
     chunker = HierarchicalSemanticChunker(
@@ -74,15 +90,30 @@ async def lifespan(app: FastAPI):
     )
     retriever.register_on_model_ready(chunker.set_embed_model)
     router_llm = LLMRouter()
-    logger.info("All DocMind backend components ready ✓")
+
+    rate_limiter = UpstashRateLimiter(
+        rest_url=settings.upstash_redis_rest_url,
+        rest_token=settings.upstash_redis_rest_token,
+        redis_url=settings.redis_url,
+    )
+    if rate_limiter.is_upstash_configured:
+        logger.info("Upstash Redis rate limiter initialized [OK]")
+    else:
+        logger.info("In-memory sliding window rate limiter initialized (Upstash credentials optional) [OK]")
+
+    logger.info("All DocMind backend components ready [OK]")
     try:
         yield
     finally:
         logger.info("DocMind backend shutting down gracefully...")
+        if task_queue:
+            await task_queue.stop()
+        if store:
+            store.close()
 
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["120/minute"])
-app = FastAPI(title="DocMind Document Intelligence API", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="DocMind Document Intelligence API", version="2.3.0", lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -96,12 +127,90 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def telemetry_middleware(request: Request, call_next):
+    start = time.perf_counter()
+    response = await call_next(request)
+    duration = time.perf_counter() - start
+    response.headers["X-Process-Time"] = f"{duration * 1000.0:.2f}ms"
+    if settings.enable_metrics:
+        metrics.record_request(request.method, request.url.path, response.status_code, duration)
+    return response
+
+
+@app.get("/metrics")
+async def prometheus_metrics():
+    """Prometheus telemetry exposition endpoint for scraping system metrics."""
+    if not settings.enable_metrics:
+        raise HTTPException(status_code=404, detail="Metrics disabled")
+    return Response(content=metrics.generate_prometheus_text(), media_type="text/plain; version=0.0.4")
+
+
+def _get_user_info(request: Request) -> Dict[str, str]:
+    """Extract verified cryptographic user identity or default guest identifier."""
+    user = extract_user_identity(request, settings.auth_secret)
+    if store and user.get("user_id") and user["user_id"] != "default_user":
+        try:
+            store.upsert_user(
+                user_id=user["user_id"],
+                email=user.get("email", "unknown@docmind.local"),
+                name=user.get("name"),
+                image=user.get("image"),
+                provider=user.get("provider", "credentials"),
+            )
+        except Exception as exc:
+            logger.debug("User upsert non-critical warning: %s", exc)
+    return user
+
+
 def _api_keys(request: Request) -> dict:
+    """Extract API keys prioritizing request headers then server environment variables."""
+    def _clean(val: Optional[str]) -> Optional[str]:
+        if val is None:
+            return None
+        v = val.strip()
+        return v if v else None
+
     return {
-        "gemini": request.headers.get("X-Gemini-Key") or settings.gemini_api_key,
-        "groq": request.headers.get("X-Groq-Key") or settings.groq_api_key,
-        "openrouter": request.headers.get("X-OpenRouter-Key") or settings.openrouter_api_key,
+        "gemini": _clean(request.headers.get("X-Gemini-Key")) or _clean(settings.gemini_api_key),
+        "groq": _clean(request.headers.get("X-Groq-Key")) or _clean(settings.groq_api_key),
+        "openrouter": _clean(request.headers.get("X-OpenRouter-Key")) or _clean(settings.openrouter_api_key),
     }
+
+
+async def _enforce_rate_limit(request: Request, limit_str: str, resource_name: str = "api"):
+    """Enforce rate limits per user/IP using Upstash Redis or sliding window memory store."""
+    if not rate_limiter:
+        return
+
+    parts = limit_str.split("/")
+    limit = int(parts[0]) if parts and parts[0].isdigit() else 20
+    window = 60
+    if len(parts) > 1:
+        unit = parts[1].lower()
+        if "sec" in unit:
+            window = 1
+        elif "min" in unit:
+            window = 60
+        elif "hour" in unit:
+            window = 3600
+
+    client_ip = request.client.host if request.client else "127.0.0.1"
+    user_id = request.headers.get("X-User-Id") or client_ip
+    key = f"{resource_name}:{user_id}"
+
+    allowed, remaining, reset_secs, retry_after = await rate_limiter.check_async(key, limit, window)
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded for {resource_name} ({limit_str}). Please wait {retry_after}s before retrying.",
+            headers={
+                "Retry-After": str(retry_after),
+                "X-RateLimit-Limit": str(limit),
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": str(reset_secs),
+            }
+        )
 
 
 def _sse(data: dict) -> str:
@@ -117,8 +226,12 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "DocMind Document Intelligence API",
-        "version": "2.0.0",
+        "version": "2.3.0",
+        "database": "postgresql" if (store and store.is_postgres) else "sqlite",
+        "storage_backend": settings.storage_backend,
+        "task_queue": task_queue.stats() if task_queue else {"status": "uninitialized"},
         "neural_models_ready": retriever.is_neural_ready if retriever else False,
+        "rate_limiter": "upstash_redis" if (rate_limiter and rate_limiter.is_upstash_configured) else "in_memory_sliding_window",
         "providers_available": ["gemini", "groq", "openrouter"],
     }
 
@@ -138,157 +251,224 @@ async def readiness():
 
 
 # ──────────────────────────────────────────────
+# System & User Statistics
+# ──────────────────────────────────────────────
+
 @app.get("/api/stats")
-async def get_system_stats():
-    """Retrieve global platform statistics."""
-    stats = store.get_stats()
+async def get_system_stats(request: Request):
+    """Retrieve platform statistics for the authenticated user session."""
+    user = _get_user_info(request)
+    stats = store.get_stats(user_id=user["user_id"])
     stats["neural_models_ready"] = retriever.is_neural_ready if retriever else False
     stats["status"] = "healthy"
+    stats["user_id"] = user["user_id"]
     return stats
 
 
 # ──────────────────────────────────────────────
-# Session Management Endpoints
+# Session Management Endpoints (User-Scoped)
 # ──────────────────────────────────────────────
 
 @app.post("/api/sessions")
-async def create_session(body: SessionCreate):
+async def create_session(body: SessionCreate, request: Request):
+    user = _get_user_info(request)
     title = body.title or "New Conversation"
-    session_id = store.create_session(title=title)
-    return {"session_id": session_id, "title": title}
+    session_id = store.create_session(title=title, user_id=user["user_id"])
+    return {"id": session_id, "session_id": session_id, "title": title, "user_id": user["user_id"]}
 
 
 @app.get("/api/sessions")
-async def list_sessions():
-    return store.list_sessions()
+async def list_sessions(request: Request):
+    user = _get_user_info(request)
+    return store.list_sessions(user_id=user["user_id"])
 
 
 @app.delete("/api/sessions")
-async def delete_all_sessions():
-    """Clear all sessions, documents, and indexes."""
-    sessions = store.list_sessions()
+async def delete_all_sessions(request: Request):
+    """Clear all sessions, documents, and indexes for the authenticated user."""
+    user = _get_user_info(request)
+    sessions = store.list_sessions(user_id=user["user_id"])
     for session in sessions:
         for doc in session.get("documents", []):
-            if doc.get("file_path") and os.path.exists(doc["file_path"]):
-                try:
-                    os.remove(doc["file_path"])
-                except OSError:
-                    pass
+            if doc.get("file_path"):
+                if storage:
+                    await storage.delete_file(doc["file_path"])
+                elif os.path.exists(doc["file_path"]):
+                    try:
+                        os.remove(doc["file_path"])
+                    except OSError:
+                        pass
         retriever.delete_session_index(session["id"])
-    store.delete_all_sessions()
-    return {"status": "all_deleted"}
+    store.delete_all_sessions(user_id=user["user_id"])
+    return {"status": "all_deleted", "user_id": user["user_id"]}
 
 
 @app.get("/api/sessions/{session_id}")
-async def get_session(session_id: str):
-    session = store.get_session(session_id)
+async def get_session(session_id: str, request: Request):
+    user = _get_user_info(request)
+    session = store.get_session(session_id, user_id=user["user_id"])
     if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail="Session not found or unauthorized")
     return session
 
 
 @app.patch("/api/sessions/{session_id}/title")
-async def update_session_title(session_id: str, body: SessionTitleUpdate):
-    session = store.get_session(session_id)
+async def update_session_title(session_id: str, body: SessionTitleUpdate, request: Request):
+    user = _get_user_info(request)
+    session = store.get_session(session_id, user_id=user["user_id"])
     if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail="Session not found or unauthorized")
     new_title = body.title.strip()
     if not new_title:
         raise HTTPException(status_code=400, detail="Title cannot be empty")
-    store.update_session_title(session_id, new_title)
+    store.update_session_title(session_id, new_title, user_id=user["user_id"])
     return {"session_id": session_id, "title": new_title}
 
 
 @app.delete("/api/sessions/{session_id}")
-async def delete_session(session_id: str):
-    session = store.get_session(session_id)
+async def delete_session(session_id: str, request: Request):
+    user = _get_user_info(request)
+    session = store.get_session(session_id, user_id=user["user_id"])
     if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail="Session not found or unauthorized")
     # Clean up document files & index
     for doc in session.get("documents", []):
-        if doc.get("file_path") and os.path.exists(doc["file_path"]):
-            try:
-                os.remove(doc["file_path"])
-            except OSError:
-                pass
+        if doc.get("file_path"):
+            if storage:
+                await storage.delete_file(doc["file_path"])
+            elif os.path.exists(doc["file_path"]):
+                try:
+                    os.remove(doc["file_path"])
+                except OSError:
+                    pass
     retriever.delete_session_index(session_id)
-    store.delete_session(session_id)
-    return {"status": "deleted"}
+    store.delete_session(session_id, user_id=user["user_id"])
+    return {"status": "deleted", "session_id": session_id}
 
 
 @app.get("/api/sessions/{session_id}/messages")
-async def get_messages(session_id: str):
+async def get_messages(session_id: str, request: Request):
+    user = _get_user_info(request)
+    session = store.get_session(session_id, user_id=user["user_id"])
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or unauthorized")
     return store.get_messages(session_id)
 
 
 # ──────────────────────────────────────────────
-# Global Cross-Session Memory Management
+# Shareable Chat Link Endpoints
+# ──────────────────────────────────────────────
+
+@app.post("/api/sessions/{session_id}/share")
+async def create_session_share_link(session_id: str, request: Request):
+    """Generate a secure public share link for a conversation."""
+    user = _get_user_info(request)
+    session = store.get_session(session_id, user_id=user["user_id"])
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or unauthorized")
+
+    share_token, shared_at = store.create_share_link(session_id, user_id=user["user_id"])
+    return {
+        "session_id": session_id,
+        "share_token": share_token,
+        "share_url": f"/share/{share_token}",
+        "shared_at": shared_at,
+        "is_shared": True,
+    }
+
+
+@app.delete("/api/sessions/{session_id}/share")
+async def revoke_session_share_link(session_id: str, request: Request):
+    """Revoke public share link for a conversation."""
+    user = _get_user_info(request)
+    session = store.get_session(session_id, user_id=user["user_id"])
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or unauthorized")
+
+    store.revoke_share_link(session_id, user_id=user["user_id"])
+    return {"session_id": session_id, "is_shared": False, "status": "revoked"}
+
+
+@app.get("/api/shared/{share_token}")
+async def get_public_shared_chat(share_token: str):
+    """Public endpoint to fetch shared conversation transcript (no auth required)."""
+    shared = store.get_shared_session(share_token)
+    if not shared:
+        raise HTTPException(
+            status_code=404,
+            detail="Shared conversation not found or public access has been revoked by the author.",
+        )
+    return shared
+
+
+# ──────────────────────────────────────────────
+# Global Cross-Session Memory Management (User-Scoped)
 # ──────────────────────────────────────────────
 
 @app.get("/api/memory")
-async def list_global_memories():
-    """List all global cross-session memories."""
-    return store.get_all_global_memories()
+async def list_global_memories(request: Request):
+    """List all global cross-session memories for the authenticated user."""
+    user = _get_user_info(request)
+    return store.get_all_global_memories(user_id=user["user_id"])
 
 
 @app.delete("/api/memory/{memory_id}")
-async def delete_memory_item(memory_id: str):
+async def delete_memory_item(memory_id: str, request: Request):
     """Delete a specific global memory item."""
-    store.delete_global_memory(memory_id)
+    user = _get_user_info(request)
+    store.delete_global_memory(memory_id, user_id=user["user_id"])
     return {"status": "deleted", "memory_id": memory_id}
 
 
 @app.delete("/api/memory")
-async def clear_all_memories():
-    """Clear all global cross-session memories."""
-    store.clear_all_global_memory()
-    return {"status": "all_cleared"}
+async def clear_all_memories(request: Request):
+    """Clear all global cross-session memories for the authenticated user."""
+    user = _get_user_info(request)
+    store.clear_all_global_memory(user_id=user["user_id"])
+    return {"status": "all_cleared", "user_id": user["user_id"]}
 
 
 # ──────────────────────────────────────────────
 # Session-Scoped Document Upload & Management
 # ──────────────────────────────────────────────
 
-ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".html", ".htm", ".csv", ".xlsx"}
-
-
 @app.post("/api/sessions/{session_id}/documents")
 async def upload_document_to_session(
     session_id: str,
+    request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...)
 ):
-    session = store.get_session(session_id)
+    # Enforce Upstash / in-memory rate limiting
+    await _enforce_rate_limit(request, settings.rate_limit_upload, resource_name="upload")
+
+    user = _get_user_info(request)
+    session = store.get_session(session_id, user_id=user["user_id"])
     if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail="Session not found or unauthorized")
 
-    raw_filename = os.path.basename(file.filename or "document.txt")
-    ext = os.path.splitext(raw_filename)[1].lower()
-    if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported file type '{ext}'. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
-        )
-
-    # Sanitize filename against path traversal
-    clean_filename = re.sub(r"[^\w.\-]", "_", raw_filename)
-    if not clean_filename or clean_filename.startswith("."):
-        clean_filename = f"upload_{clean_filename}"
-
+    # Read uploaded bytes with size bounds checking
     content = await file.read()
-    if len(content) > settings.max_file_size_bytes:
-        max_mb = settings.max_file_size_bytes / (1024 * 1024)
-        raise HTTPException(
-            status_code=413,
-            detail=f"File size exceeds maximum allowed limit of {max_mb:.0f} MB.",
+
+    # Server-side validation and sanitization
+    try:
+        clean_filename, ext = DocumentParser.validate_upload(
+            file_bytes=content,
+            raw_filename=file.filename or "document.txt",
+            max_size_bytes=settings.max_file_size_bytes
         )
+    except ValueError as val_err:
+        raise HTTPException(status_code=400, detail=str(val_err))
 
     doc_id = str(uuid.uuid4())
     safe_name = f"{session_id}_{doc_id}_{clean_filename}"
-    file_path = os.path.join(settings.upload_dir, safe_name)
 
-    async with aiofiles.open(file_path, "wb") as f:
-        await f.write(content)
+    if storage:
+        file_path = await storage.save_file(content=content, destination_name=safe_name)
+    else:
+        file_path = os.path.join(settings.upload_dir, safe_name)
+        async with aiofiles.open(file_path, "wb") as f:
+            await f.write(content)
 
     file_type = ext.lstrip(".")
     # Save to database immediately with status="processing"
@@ -307,7 +487,7 @@ async def upload_document_to_session(
     # Automatically update session title if default
     if session["title"] in ("New Conversation", "New Chat") or len(session.get("documents", [])) == 0:
         clean_title = clean_filename.rsplit(".", 1)[0].replace("_", " ").replace("-", " ")
-        store.update_session_title(session_id, clean_title[:60])
+        store.update_session_title(session_id, clean_title[:60], user_id=user["user_id"])
 
     # Background async processing with timeout protection
     async def _process_document_background(d_id: str, s_id: str, f_path: str, f_name: str):
@@ -334,29 +514,38 @@ async def upload_document_to_session(
                 word_count=w_count,
                 status="ready",
             )
-            logger.info("Background processing complete for '%s' ✓ (%d chunks indexed)", f_name, len(chunks))
+            if settings.enable_metrics:
+                metrics.record_document_processed(file_type, "success")
+            logger.info("Background processing complete for '%s' [OK] (%d chunks indexed)", f_name, len(chunks))
         except asyncio.TimeoutError:
             logger.error("Processing timed out for document '%s'", f_name)
             store.update_document_processed(
-                doc_id=d_id,
-                chunk_count=0,
-                char_count=0,
-                word_count=0,
-                status="error",
+                doc_id=d_id, chunk_count=0, char_count=0, word_count=0, status="error"
             )
+            if settings.enable_metrics:
+                metrics.record_document_processed(file_type, "timeout")
         except Exception as exc:
             logger.exception("Background processing failed for '%s': %s", f_name, exc)
             store.update_document_processed(
-                doc_id=d_id,
-                chunk_count=0,
-                char_count=0,
-                word_count=0,
-                status="error",
+                doc_id=d_id, chunk_count=0, char_count=0, word_count=0, status="error"
             )
+            if settings.enable_metrics:
+                metrics.record_document_processed(file_type, "error")
 
-    background_tasks.add_task(_process_document_background, doc_id, session_id, file_path, clean_filename)
+    if task_queue and task_queue._running:
+        await task_queue.enqueue(
+            f"process_document_{doc_id}",
+            _process_document_background,
+            doc_id,
+            session_id,
+            file_path,
+            clean_filename,
+        )
+    else:
+        background_tasks.add_task(_process_document_background, doc_id, session_id, file_path, clean_filename)
 
     return {
+        "id": doc_id,
         "doc_id": doc_id,
         "session_id": session_id,
         "filename": clean_filename,
@@ -370,23 +559,35 @@ async def upload_document_to_session(
 
 
 @app.get("/api/sessions/{session_id}/documents")
-async def list_session_documents(session_id: str):
+async def list_session_documents(session_id: str, request: Request):
+    user = _get_user_info(request)
+    session = store.get_session(session_id, user_id=user["user_id"])
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or unauthorized")
     return store.list_session_documents(session_id)
 
 
 @app.delete("/api/documents/{doc_id}")
-async def delete_document(doc_id: str):
+async def delete_document(doc_id: str, request: Request):
+    user = _get_user_info(request)
     doc = store.get_document(doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
+    session = store.get_session(doc["session_id"], user_id=user["user_id"])
+    if not session:
+        raise HTTPException(status_code=403, detail="Unauthorized document access")
+
     session_id = doc["session_id"]
     store.delete_document(doc_id)
     retriever.remove_document_from_session(session_id, doc_id)
-    if doc.get("file_path") and os.path.exists(doc["file_path"]):
-        try:
-            os.remove(doc["file_path"])
-        except OSError:
-            pass
+    if doc.get("file_path"):
+        if storage:
+            await storage.delete_file(doc["file_path"])
+        elif os.path.exists(doc["file_path"]):
+            try:
+                os.remove(doc["file_path"])
+            except OSError:
+                pass
     return {"status": "deleted", "session_id": session_id}
 
 
@@ -414,12 +615,10 @@ Your top priority is to communicate in a **standard, formal, and professional ma
    - Always include a space after markdown hashes (e.g. `### Heading`, never `###Heading`).
    - Always close bold tags `**text**` cleanly before starting any new section or list.
    - Separate bullet lists, code blocks, and tables with clean blank lines for pristine readability.
-   - **CRITICAL — Never split italic or bold across paragraph breaks.** An italic or bold span MUST open AND close on the same paragraph (i.e., within the same block of text without a blank line in between). NEVER write `*word\n\nmore words*` — the blank line breaks the Markdown renderer.
-   - Use **`-`** for all bullet list items. NEVER use `*` or literal bullet characters like `•` or `▪` as bullet markers.
+   - **CRITICAL — Never split italic or bold across paragraph breaks.** An italic or bold span MUST open AND close on the same paragraph.
+   - Use **`-`** for all bullet list items. NEVER use `*` or literal bullet characters as bullet markers.
    - For key definitions, always format cleanly as `- **Term Name:** Clear explanation.` on a single line.
    - Format document citations cleanly as `[Document.docx]` directly attached to sentences without trailing spaces before punctuation.
-   - Never write orphaned asterisks like `*Azure Virtual Machines\n\n(Microsoft Azure)` — keep parentheticals on the same line or write them as plain text.
-
 
 ## DOCUMENT-GROUNDING PROTOCOL
 Follow this decision flow for every user query:
@@ -451,20 +650,22 @@ CROSS-SESSION GLOBAL MEMORY (Context from past conversations):
 """
 
 
-
 @app.post("/api/chat")
-@limiter.limit(settings.rate_limit_chat)
 async def chat(request: Request, body: ChatRequest):
+    # Enforce Upstash / in-memory rate limiting
+    await _enforce_rate_limit(request, settings.rate_limit_chat, resource_name="chat")
+
+    user = _get_user_info(request)
     keys = _api_keys(request)
     if not any(keys.values()):
         raise HTTPException(
             status_code=400,
-            detail="No API keys found. Please add at least one key (Gemini, Groq, or OpenRouter) in Settings.",
+            detail="No API keys configured on server or in request. Please configure Gemini, Groq, or OpenRouter keys.",
         )
 
-    session = store.get_session(body.session_id)
+    session = store.get_session(body.session_id, user_id=user["user_id"])
     if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail="Session not found or unauthorized")
 
     query = body.message.strip()
     if not query:
@@ -473,8 +674,8 @@ async def chat(request: Request, body: ChatRequest):
     # 1. Retrieve session document chunks
     retrieved_chunks = await asyncio.to_thread(retriever.retrieve, body.session_id, query)
 
-    # 2. Retrieve global cross-session memory
-    all_other_memories = store.get_all_global_memories(exclude_session_id=body.session_id)
+    # 2. Retrieve user-isolated global cross-session memory
+    all_other_memories = store.get_all_global_memories(user_id=user["user_id"], exclude_session_id=body.session_id)
     recalled_memories = await asyncio.to_thread(
         retriever.retrieve_global_memory, query, all_other_memories, top_k=3
     )
@@ -513,14 +714,14 @@ async def chat(request: Request, body: ChatRequest):
             messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": query})
 
-    # Save user message & memory
+    # Save user message & user-isolated memory
     store.save_message(body.session_id, "user", query)
-    store.save_global_memory(body.session_id, session["title"], "user", query)
+    store.save_global_memory(body.session_id, session["title"], "user", query, user_id=user["user_id"])
 
     # If first message, auto-update title
     if len(history) == 0 and session["title"] in ("New Conversation", "New Chat"):
         new_title = query[:40] + ("…" if len(query) > 40 else "")
-        store.update_session_title(body.session_id, new_title)
+        store.update_session_title(body.session_id, new_title, user_id=user["user_id"])
 
     # ── Streaming Generator ──
     async def generate():
@@ -529,7 +730,7 @@ async def chat(request: Request, body: ChatRequest):
             {
                 "child_text": r["child_text"],
                 "section": r["metadata"].get("section", "Document"),
-                "doc_id": r["metadata"].get("doc_id"),
+                "doc_id": r.get("doc_id") or r["metadata"].get("doc_id"),
                 "title": r["metadata"].get("title") or r["metadata"].get("source") or "Document",
                 "page_number": r["metadata"].get("page_number"),
                 "rerank_score": r["rerank_score"],
@@ -540,7 +741,7 @@ async def chat(request: Request, body: ChatRequest):
         ]
         memory_payload = recalled_memories
 
-        # Immediately send recalled memory & sources metadata to frontend
+        # Send recalled memory & sources metadata to frontend
         if memory_payload:
             yield _sse({"type": "memory_recalled", "memories": memory_payload})
         if sources_payload:
@@ -561,6 +762,8 @@ async def chat(request: Request, body: ChatRequest):
 
             # Save assistant response & memory
             if full_response.strip():
+                if settings.enable_metrics:
+                    metrics.record_tokens("llm_stream", max(1, len(full_response) // 4))
                 store.save_message(
                     body.session_id,
                     "assistant",
@@ -573,6 +776,7 @@ async def chat(request: Request, body: ChatRequest):
                     session["title"],
                     "assistant",
                     full_response[:500],
+                    user_id=user["user_id"],
                 )
 
             yield _sse({"type": "done"})
@@ -598,15 +802,17 @@ async def chat(request: Request, body: ChatRequest):
 # ──────────────────────────────────────────────
 
 @app.post("/api/sessions/{session_id}/summarize")
-@limiter.limit(settings.rate_limit_summarize)
 async def summarize_session(session_id: str, request: Request):
+    await _enforce_rate_limit(request, settings.rate_limit_summarize, resource_name="summarize")
+
+    user = _get_user_info(request)
     keys = _api_keys(request)
     if not any(keys.values()):
         raise HTTPException(status_code=400, detail="No API keys configured.")
 
-    session = store.get_session(session_id)
+    session = store.get_session(session_id, user_id=user["user_id"])
     if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail="Session not found or unauthorized")
 
     docs = session.get("documents", [])
     if not docs:
@@ -652,6 +858,20 @@ async def summarize_session(session_id: str, request: Request):
             ):
                 full += token
                 yield _sse({"type": "token", "content": token})
+
+            if full.strip():
+                if settings.enable_metrics:
+                    metrics.record_tokens("llm_stream", max(1, len(full) // 4))
+                store.save_message(session_id, "user", "Please provide a standard and formal summary of the attached document(s) in simple, understandable words.")
+                store.save_message(session_id, "assistant", full)
+                store.save_global_memory(
+                    session_id,
+                    session["title"],
+                    "assistant",
+                    full[:500],
+                    user_id=user["user_id"],
+                )
+
             yield _sse({"type": "done"})
         except Exception as exc:
             yield _sse({"type": "error", "message": str(exc)})
@@ -675,25 +895,27 @@ async def summarize_session(session_id: str, request: Request):
 @app.post("/api/sessions/{session_id}/url")
 async def ingest_url_to_session(
     session_id: str,
+    request: Request,
     body: UrlIngestRequest,
     background_tasks: BackgroundTasks
 ):
-    session = store.get_session(session_id)
+    await _enforce_rate_limit(request, settings.rate_limit_url, resource_name="url_ingest")
+
+    user = _get_user_info(request)
+    session = store.get_session(session_id, user_id=user["user_id"])
     if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail="Session not found or unauthorized")
 
     url = body.url.strip()
     doc_id = str(uuid.uuid4())
     domain_name = url.split("//")[-1].split("/")[0]
     clean_filename = f"URL_{domain_name}_{doc_id[:6]}"
 
-    # Fetch and parse URL text synchronously/async
     try:
         url_text, metadata = parser.parse_url(url)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Failed to ingest URL: {exc}")
 
-    # Save to database immediately
     store.save_document(
         doc_id=doc_id,
         session_id=session_id,
@@ -706,7 +928,6 @@ async def ingest_url_to_session(
         status="processing",
     )
 
-    # Background async chunking & indexing
     async def _process_url_background(d_id: str, s_id: str, text: str, meta: dict):
         try:
             chunks = await asyncio.wait_for(
@@ -724,16 +945,31 @@ async def ingest_url_to_session(
                 word_count=len(text.split()),
                 status="ready",
             )
-            logger.info("URL processing complete for '%s' ✓ (%d chunks indexed)", url, len(chunks))
+            if settings.enable_metrics:
+                metrics.record_document_processed("url", "success")
+            logger.info("URL processing complete for '%s' [OK] (%d chunks indexed)", url, len(chunks))
         except Exception as exc:
             logger.exception("URL background processing failed for '%s': %s", url, exc)
             store.update_document_processed(
                 doc_id=d_id, chunk_count=0, char_count=0, word_count=0, status="error"
             )
+            if settings.enable_metrics:
+                metrics.record_document_processed("url", "error")
 
-    background_tasks.add_task(_process_url_background, doc_id, session_id, url_text, metadata)
+    if task_queue and task_queue._running:
+        await task_queue.enqueue(
+            f"process_url_{doc_id}",
+            _process_url_background,
+            doc_id,
+            session_id,
+            url_text,
+            metadata,
+        )
+    else:
+        background_tasks.add_task(_process_url_background, doc_id, session_id, url_text, metadata)
 
     return {
+        "id": doc_id,
         "doc_id": doc_id,
         "session_id": session_id,
         "filename": metadata.get("title") or clean_filename,
@@ -749,33 +985,41 @@ async def ingest_url_to_session(
 
 @app.post("/api/sessions/{session_id}/compare")
 async def compare_documents(session_id: str, request: Request, body: CompareRequest):
+    await _enforce_rate_limit(request, settings.rate_limit_compare, resource_name="compare")
+
+    user = _get_user_info(request)
     keys = _api_keys(request)
     if not any(keys.values()):
         raise HTTPException(status_code=400, detail="No API keys configured.")
 
-    session = store.get_session(session_id)
+    session = store.get_session(session_id, user_id=user["user_id"])
     if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail="Session not found or unauthorized")
 
     docs = session.get("documents", [])
     if not docs:
         raise HTTPException(status_code=400, detail="No documents uploaded in this chat session to compare.")
 
-    selected_docs = [d for d in docs if not body.doc_ids or d["doc_id"] in body.doc_ids]
+    selected_docs = [
+        d for d in docs
+        if not body.doc_ids or (d.get("doc_id") in body.doc_ids or d.get("id") in body.doc_ids)
+    ]
     if len(selected_docs) < 2:
         raise HTTPException(
             status_code=400,
             detail="At least 2 documents are required for comparison. Please upload another file.",
         )
 
-    # Retrieve context chunks for each document
     doc_contexts = []
-    for d in selected_docs[:4]:  # Max 4 docs for comparison matrix
+    for d in selected_docs[:4]:
         chunks = await asyncio.to_thread(
             retriever.retrieve, session_id, f"overview key points {body.focus_topic}", top_k=5
         )
-        # Filter chunks for this doc if doc_id matches
-        doc_chunks = [c for c in chunks if c.get("metadata", {}).get("doc_id") == d["doc_id"]]
+        target_id = d.get("doc_id") or d.get("id")
+        doc_chunks = [
+            c for c in chunks
+            if (c.get("doc_id") == target_id or c.get("metadata", {}).get("doc_id") == target_id)
+        ]
         if not doc_chunks:
             doc_chunks = chunks[:3]
         text_summary = "\n".join([c["child_text"] for c in doc_chunks])
@@ -831,13 +1075,16 @@ async def compare_documents(session_id: str, request: Request, body: CompareRequ
 
 @app.post("/api/sessions/{session_id}/quiz")
 async def generate_quiz(session_id: str, request: Request, body: QuizRequest):
+    await _enforce_rate_limit(request, settings.rate_limit_quiz, resource_name="quiz")
+
+    user = _get_user_info(request)
     keys = _api_keys(request)
     if not any(keys.values()):
         raise HTTPException(status_code=400, detail="No API keys configured.")
 
-    session = store.get_session(session_id)
+    session = store.get_session(session_id, user_id=user["user_id"])
     if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail="Session not found or unauthorized")
 
     docs = session.get("documents", [])
     if not docs:
@@ -875,7 +1122,6 @@ async def generate_quiz(session_id: str, request: Request, body: QuizRequest):
             openrouter_model=settings.openrouter_model,
         )
 
-        # Clean JSON markdown fences and extract array
         clean_str = re.sub(r"^```(?:json)?", "", raw_json.strip(), flags=re.IGNORECASE)
         clean_str = re.sub(r"```$", "", clean_str.strip()).strip()
         try:

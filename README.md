@@ -39,8 +39,11 @@ Whether analyzing complex legal contracts, financial spreadsheets, research pape
 | 🌐 **Memory** | **Cross-Session Global Memory** | Neural memory engine indexing insights across chats to recall relevant historical context in new conversations. |
 | 🛡️ **Grounding** | **Strict Anti-Hallucination Protocol** | Explicit document citations and transparent disclosure notices when queries fall outside the document scope. |
 | ⚡ **Resilience** | **Cascading Multi-LLM Router** | Automatic fallback chain: **Google Gemini $\rightarrow$ Groq $\rightarrow$ OpenRouter** on rate limits (429), quota limits, or server errors. |
+| 🔐 **Authentication** | **Google & GitHub OAuth 2.0** | One-click OAuth login, cryptographic JWT sessions, user isolation, and guest mode. |
+| 🐘 **Persistence** | **PostgreSQL & SQLite Storage** | Dual-engine persistence supporting PostgreSQL with connection pooling (`DATABASE_URL`) and automatic SQLite WAL fallback. |
+| 🔗 **Collaboration** | **Public Shareable Chat Links** | Instant public read-only transcript links (`/share/[shareToken]`) with fine-grained access revocation and credential sanitization. |
 | 🎨 **User Experience** | **Modern Glassmorphic UI** | Next.js 16 + React 19 interface with real-time SSE streaming, particle background, 3D tilt effects, keyboard hotkeys, and dark theme. |
-| 💾 **Data & Export** | **Multi-Format Export & WAL Storage** | Export full conversation transcripts to **Markdown, JSON, or Plain Text**. SQLite with Write-Ahead Logging (WAL) for concurrent read/writes. |
+| 💾 **Data & Export** | **Multi-Format Export & PDF** | Export full conversation transcripts to **PDF, Markdown, JSON, or Plain Text**. |
 
 ---
 
@@ -85,7 +88,7 @@ flowchart TD
     end
 
     subgraph Persistence ["💾 Persistence Layer"]
-        SQLite[(SQLite WAL Database: summarizer.db)]
+        DB[(PostgreSQL / SQLite WAL: Sessions, History, Shares)]
         Disk_Indexes[(Serialized Embeddings & Indexes)]
         Uploads[(File Storage / Uploads)]
     end
@@ -103,7 +106,7 @@ flowchart TD
     Parent_Expander & Memory_Retriever --> LLM_Router
     LLM_Router -->|Stream Tokens SSE| SSE_Handler --> UI
 
-    Endpoints --> SQLite
+    Endpoints --> DB
     Endpoints --> Uploads
 ```
 
@@ -150,16 +153,20 @@ DocMind uses a refined 5-stage retrieval-augmented generation architecture:
 ```
 DocumentSummarizer/
 ├── backend/                        # FastAPI Backend Application
+│   ├── auth.py                     # HMAC-SHA256 JWT auth & identity extraction
 │   ├── chunker.py                  # Hierarchical semantic chunker & subword vectorizer
 │   ├── config.py                   # Pydantic environment configuration
 │   ├── document_parser.py          # Unified parser for PDF, DOCX, XLSX, CSV, HTML, TXT
 │   ├── llm_router.py               # Cascading LLM router (Gemini → Groq → OpenRouter)
-│   ├── main.py                     # FastAPI application routes, SSE streaming, lifecycle
+│   ├── main.py                     # FastAPI application routes, SSE streaming, telemetry
+│   ├── metrics.py                  # Prometheus metrics collector (/metrics endpoint)
 │   ├── models.py                   # Pydantic schemas for requests and responses
+│   ├── rate_limiter.py             # Upstash Redis & sliding-window rate limiter
 │   ├── requirements.txt            # Python dependencies (PyTorch, transformers, FastAPI)
 │   ├── retrieval.py                # BM25 + Dense + Cross-Encoder hybrid retriever
 │   ├── session_store.py            # SQLite WAL store for sessions, messages & memory
-│   ├── test_backend.py             # Comprehensive test suite for backend components
+│   ├── storage.py                  # Pluggable storage abstraction (Local & S3/MinIO)
+│   ├── task_queue.py               # Bounded asynchronous task queue & worker pool
 │   ├── Dockerfile                  # Production container definition for backend
 │   └── .env.example                # Backend environment variable template
 │
@@ -167,11 +174,18 @@ DocumentSummarizer/
 │   ├── public/                     # Static assets, icons, manifest
 │   ├── src/
 │   │   ├── app/
+│   │   │   ├── api/
+│   │   │   │   ├── auth/           # NextAuth session & JWT token issuing
+│   │   │   │   ├── backend/        # Secure reverse proxy to FastAPI backend
+│   │   │   │   └── keys/           # Server-side encrypted API key store
 │   │   │   ├── globals.css         # Global design system, glassmorphism & typography
 │   │   │   ├── layout.tsx          # Root layout & font configurations
 │   │   │   ├── page.tsx            # Main application page & state orchestrator
 │   │   │   └── error.tsx           # Graceful client error boundary
 │   │   ├── components/
+│   │   │   ├── AuthModal.tsx       # Authentication & user profile modal
+│   │   │   ├── CompareModal.tsx    # Multi-document comparison matrix view
+│   │   │   ├── DocumentViewerModal.tsx # In-browser document preview
 │   │   │   ├── EmptyState.tsx      # Interactive welcome view with sample prompts
 │   │   │   ├── GlobalMemoryModal.tsx # Cross-session memory manager & search
 │   │   │   ├── InteractiveBackground.tsx # GPU-accelerated ambient particle canvas
@@ -180,10 +194,14 @@ DocumentSummarizer/
 │   │   │   ├── Modals.tsx          # Document upload modal & API key settings modal
 │   │   │   ├── NeuralWaveform.tsx  # Dynamic audio/AI waveform visualization
 │   │   │   ├── PipelineModal.tsx   # Visual interactive RAG pipeline inspector
+│   │   │   ├── QuizModal.tsx       # Interactive AI quiz & flashcard generator
 │   │   │   ├── Sidebar.tsx         # Conversation history, session actions & stats
 │   │   │   └── TiltCard.tsx        # 3D interactive physics hover card
 │   │   └── lib/
 │   │       ├── api.ts              # Typed fetch client with SSE streaming support
+│   │       ├── auth-token.ts       # Cryptographic JWT signing & verification
+│   │       ├── auth.tsx            # React authentication context provider
+│   │       ├── markdown.ts         # Markdown styling & sanitization
 │   │       └── types.ts            # TypeScript interfaces & data contracts
 │   ├── package.json                # Frontend dependencies & Next.js scripts
 │   └── Dockerfile                  # Multi-stage production container for frontend
@@ -357,22 +375,17 @@ Accelerate your workflow with built-in hotkeys:
 
 ---
 
-## 🧪 Testing & Verification
+## 🩺 Health & Observability
 
-DocMind includes a comprehensive test suite verifying session isolation, document parsing, hierarchical chunking, hybrid retrieval, and API endpoints:
+DocMind features built-in telemetry, diagnostic endpoints, and Prometheus metrics:
 
-```bash
-cd backend
-python test_backend.py
-```
-
-The test runner will validate:
-1. **SessionStore & WAL Mode** — Multi-session isolation and memory persistence.
-2. **DocumentParser** — Text extraction across TXT, Markdown, PDF, and CSV formats.
-3. **HierarchicalSemanticChunker** — Parent/child splitting, token bounds, and contextual prefixing.
-4. **HybridRetriever** — BM25 + Dense vector search, RRF scoring, and cross-encoder reranking.
-5. **LLMRouter** — Fallback routing across provider chains.
-6. **FastAPI Endpoints** — Live test client requests for health, sessions, upload, chat, and memory.
+- **Health Diagnostics (`GET /api/health`)**: Reports operational status, component readiness, storage backend, task queue workers, and neural model status:
+  ```bash
+  curl http://localhost:8000/api/health
+  ```
+- **Liveness Probe (`GET /api/health/live`)**: Standard Kubernetes/container liveness probe.
+- **Readiness Probe (`GET /api/health/ready`)**: Verifies database and neural index readiness.
+- **Prometheus Metrics (`GET /metrics`)**: Exposes Prometheus exposition format tracking HTTP traffic, route latencies, LLM tokens, document ingestion counts, and retrieval latencies.
 
 ---
 

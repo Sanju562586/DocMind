@@ -26,6 +26,7 @@ import { format, isToday, isYesterday, parseISO } from "date-fns";
 import { motion, AnimatePresence } from "framer-motion";
 import { Session, ApiKeys } from "@/lib/types";
 import { deleteSession, deleteAllSessions, renameSession } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 
 interface SidebarProps {
   isOpen: boolean;
@@ -84,6 +85,7 @@ export default function Sidebar({
   onOpenUrlIngest,
   onCloseSidebar,
 }: SidebarProps) {
+  const { user, openAuthModal } = useAuth();
   const [searchQuery, setSearchQuery] = useState("");
   const [deletingSession, setDeletingSession] = useState<string | null>(null);
   const [confirmClearAll, setConfirmClearAll] = useState(false);
@@ -607,6 +609,68 @@ export default function Sidebar({
             </div>
           ))}
         </AnimatePresence>
+      </div>
+
+      {/* User Profile & Workspace Switcher */}
+      <div style={{ padding: "0 10px 10px 10px" }}>
+        <motion.div
+          onClick={openAuthModal}
+          whileHover={{ scale: 1.02, borderColor: "rgba(99, 102, 241, 0.5)" }}
+          whileTap={{ scale: 0.98 }}
+          style={{
+            padding: "8px 10px",
+            borderRadius: 8,
+            background: "rgba(255, 255, 255, 0.04)",
+            border: "1px solid rgba(255, 255, 255, 0.08)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            cursor: "pointer",
+            transition: "all 0.15s ease",
+          }}
+          title="Switch profile or sign in"
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 8, overflow: "hidden" }}>
+            <div
+              style={{
+                width: 26,
+                height: 26,
+                borderRadius: "50%",
+                background: "rgba(99, 102, 241, 0.2)",
+                border: "1px solid rgba(99, 102, 241, 0.4)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: 14,
+                flexShrink: 0,
+              }}
+            >
+              {user?.image || "👤"}
+            </div>
+            <div style={{ overflow: "hidden", textAlign: "left" }}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: "#fff", whiteSpace: "nowrap", textOverflow: "ellipsis", overflow: "hidden" }}>
+                {user?.name || "Guest User"}
+              </div>
+              <div style={{ fontSize: 9.5, color: "rgba(255, 255, 255, 0.5)", whiteSpace: "nowrap", textOverflow: "ellipsis", overflow: "hidden" }}>
+                {user?.role || "Private Workspace"}
+              </div>
+            </div>
+          </div>
+          <div
+            style={{
+              fontSize: 9,
+              padding: "2px 6px",
+              borderRadius: 4,
+              background: "rgba(99, 102, 241, 0.15)",
+              color: "#818cf8",
+              border: "1px solid rgba(99, 102, 241, 0.3)",
+              fontWeight: 500,
+              flexShrink: 0,
+            }}
+          >
+            Switch
+          </div>
+        </motion.div>
       </div>
 
       {/* Footer: Settings & Shortcuts Button */}
