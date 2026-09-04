@@ -287,48 +287,142 @@ class HybridRetriever:
         query: str,
         top_k: Optional[int] = None,
         candidates_k: Optional[int] = None,
+        additional_session_ids: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Hybrid retrieval (BM25 + Semantic Search + RRF + Cross-Encoder) for a session's documents.
+        Supports optional additional_session_ids to retrieve across ALL previously uploaded documents.
         """
         top_k = top_k or self.top_k
         candidates_k = candidates_k or self.candidates_k
 
-        if session_id not in self._session_chunks:
-            try:
-                self._load_session_index(session_id)
-            except Exception:
-                return []
-
-        chunks = self._session_chunks.get(session_id, [])
-        n = len(chunks)
-        if n == 0:
-            return []
-
         t_start = time.perf_counter()
 
-        # ── Stage 1a: BM25 (Keyword) ──
-        t0 = time.perf_counter()
-        tokenized_query = query.lower().split()
-        bm25_model = self._session_bm25[session_id]
-        bm25_scores = bm25_model.get_scores(tokenized_query)
-        bm25_ranks = np.argsort(bm25_scores)[::-1]
-        bm25_latency = (time.perf_counter() - t0) * 1000.0
+        # Multi-session (global knowledge across all uploaded documents)
+        if additional_session_ids:
+            all_chunks: List[Chunk] = []
+            all_embeddings_list: List[np.ndarray] = []
 
-        # ── Stage 1b: Dense (Semantic) ──
-        t1 = time.perf_counter()
-        if self._bi_encoder is not None:
-            query_emb = self._bi_encoder.encode([query], normalize_embeddings=True)[0].astype(np.float32)
-        else:
-            query_emb = self._fallback_vectorizer.encode([query])[0].astype(np.float32)
+            # Current session chunks first
+            current_chunks = self.get_session_chunks(session_id)
+            if current_chunks:
+                all_chunks.extend(current_chunks)
+                cur_emb = self._session_embeddings.get(session_id)
+                if cur_emb is not None and len(cur_emb) == len(current_chunks):
+                    all_embeddings_list.append(cur_emb)
+                elif self._bi_encoder is not None:
+                    all_embeddings_list.append(self._bi_encoder.encode([c.contextual_text for c in current_chunks], normalize_embeddings=True))
+                else:
+                    all_embeddings_list.append(self._fallback_vectorizer.encode([c.contextual_text for c in current_chunks]))
 
-        doc_embs = self._session_embeddings[session_id]
-        if doc_embs.shape[1] == query_emb.shape[0]:
-            dense_scores = doc_embs @ query_emb
+            # Chunks from other previous sessions
+            for other_sid in additional_session_ids:
+                if other_sid == session_id:
+                    continue
+                other_chunks = self.get_session_chunks(other_sid)
+                if not other_chunks:
+                    continue
+
+                tagged_other_chunks = []
+                for c in other_chunks:
+                    c_meta = dict(c.metadata)
+                    c_meta["is_cross_session"] = True
+                    doc_title = c_meta.get("title") or c_meta.get("source") or "Document"
+                    if "Previous Chat" not in doc_title:
+                        c_meta["title"] = f"{doc_title} (Previous Chat)"
+                    tagged_c = Chunk(
+                        id=c.id,
+                        text=c.text,
+                        contextual_text=c.contextual_text,
+                        parent_id=c.parent_id,
+                        parent_text=c.parent_text,
+                        doc_id=c.doc_id,
+                        session_id=c.session_id,
+                        chunk_index=c.chunk_index,
+                        parent_index=c.parent_index,
+                        metadata=c_meta,
+                    )
+                    tagged_other_chunks.append(tagged_c)
+
+                all_chunks.extend(tagged_other_chunks)
+                other_emb = self._session_embeddings.get(other_sid)
+                if other_emb is not None and len(other_emb) == len(other_chunks):
+                    all_embeddings_list.append(other_emb)
+                elif self._bi_encoder is not None:
+                    all_embeddings_list.append(self._bi_encoder.encode([c.contextual_text for c in other_chunks], normalize_embeddings=True))
+                else:
+                    all_embeddings_list.append(self._fallback_vectorizer.encode([c.contextual_text for c in other_chunks]))
+
+            if not all_chunks:
+                return []
+
+            chunks = all_chunks
+            n = len(chunks)
+            tokenized_all = [c.contextual_text.lower().split() for c in chunks]
+            if _HAVE_BM25:
+                bm25_model = BM25Okapi(tokenized_all)
+            else:
+                bm25_model = SimpleBM25(tokenized_all)
+
+            if all_embeddings_list:
+                doc_embs = np.vstack(all_embeddings_list).astype(np.float32)
+            else:
+                doc_embs = np.zeros((n, 384), dtype=np.float32)
+
+            t0 = time.perf_counter()
+            tokenized_query = query.lower().split()
+            bm25_scores = bm25_model.get_scores(tokenized_query)
+            bm25_ranks = np.argsort(bm25_scores)[::-1]
+            bm25_latency = (time.perf_counter() - t0) * 1000.0
+
+            t1 = time.perf_counter()
+            if self._bi_encoder is not None:
+                query_emb = self._bi_encoder.encode([query], normalize_embeddings=True)[0].astype(np.float32)
+            else:
+                query_emb = self._fallback_vectorizer.encode([query])[0].astype(np.float32)
+
+            if doc_embs.shape[1] == query_emb.shape[0]:
+                dense_scores = doc_embs @ query_emb
+            else:
+                dense_scores = np.zeros(n, dtype=np.float32)
+            dense_ranks = np.argsort(dense_scores)[::-1]
+            dense_latency = (time.perf_counter() - t1) * 1000.0
+
         else:
-            dense_scores = np.zeros(n, dtype=np.float32)
-        dense_ranks = np.argsort(dense_scores)[::-1]
-        dense_latency = (time.perf_counter() - t1) * 1000.0
+            # Single session retrieval (Current Chat Only)
+            if session_id not in self._session_chunks:
+                try:
+                    self._load_session_index(session_id)
+                except Exception:
+                    return []
+
+            chunks = self._session_chunks.get(session_id, [])
+            n = len(chunks)
+            if n == 0:
+                return []
+
+            # ── Stage 1a: BM25 (Keyword) ──
+            t0 = time.perf_counter()
+            tokenized_query = query.lower().split()
+            bm25_model = self._session_bm25[session_id]
+            bm25_scores = bm25_model.get_scores(tokenized_query)
+            bm25_ranks = np.argsort(bm25_scores)[::-1]
+            bm25_latency = (time.perf_counter() - t0) * 1000.0
+
+            # ── Stage 1b: Dense (Semantic) ──
+            t1 = time.perf_counter()
+            if self._bi_encoder is not None:
+                query_emb = self._bi_encoder.encode([query], normalize_embeddings=True)[0].astype(np.float32)
+            else:
+                query_emb = self._fallback_vectorizer.encode([query])[0].astype(np.float32)
+
+            doc_embs = self._session_embeddings[session_id]
+            if doc_embs.shape[1] == query_emb.shape[0]:
+                dense_scores = doc_embs @ query_emb
+            else:
+                dense_scores = np.zeros(n, dtype=np.float32)
+            dense_ranks = np.argsort(dense_scores)[::-1]
+            dense_latency = (time.perf_counter() - t1) * 1000.0
 
         # ── Stage 2: Reciprocal Rank Fusion (RRF) ──
         RRF_K = 60

@@ -234,6 +234,42 @@ export interface MessageBubbleProps {
 
 export function MessageBubble({ message, isLatest, onOpenCitation, onSelectFollowUp }: MessageBubbleProps) {
   const isUser = message.role === "user";
+  const isSystem = message.role === "system";
+
+  if (isSystem) {
+    return (
+      <motion.div
+        className="message-system-row"
+        initial={{ opacity: 0, y: 6 }}
+        animate={{ opacity: 1, y: 0 }}
+        style={{
+          display: "flex",
+          justifyContent: "center",
+          margin: "12px 0",
+          width: "100%",
+        }}
+      >
+        <div
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "6px 14px",
+            background: "rgba(255, 255, 255, 0.05)",
+            border: "1px solid rgba(255, 255, 255, 0.12)",
+            borderRadius: 20,
+            fontSize: 12,
+            color: "#D4D4D4",
+            maxWidth: "90%",
+          }}
+        >
+          <FileText size={13} color="#38BDF8" style={{ flexShrink: 0 }} />
+          <span>{message.content}</span>
+        </div>
+      </motion.div>
+    );
+  }
+
   const timeStr = useMemo(() => {
     try {
       return format(new Date(message.created_at), "h:mm a");

@@ -46,9 +46,16 @@ def is_safe_url(url: str) -> bool:
 
 
 class DocumentParser:
+    # Broad catalog of recognized formats (any unlisted format falls back to universal parser)
     SUPPORTED_TYPES = {
-        ".pdf", ".docx", ".txt", ".md", ".html", ".htm",
-        ".csv", ".xlsx", ".png", ".jpg", ".jpeg", ".bmp", ".tiff"
+        ".pdf", ".docx", ".pptx", ".ppt", ".txt", ".md", ".html", ".htm",
+        ".csv", ".tsv", ".xlsx", ".xls", ".epub", ".rtf",
+        ".json", ".jsonl", ".xml", ".yaml", ".yml", ".toml", ".ini", ".conf", ".cfg",
+        ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".c", ".cpp", ".h", ".hpp",
+        ".cs", ".go", ".rs", ".rb", ".php", ".sh", ".bash", ".zsh", ".ps1", ".bat",
+        ".sql", ".r", ".swift", ".kt", ".dart", ".scala", ".lua", ".css", ".scss",
+        ".rst", ".tex", ".latex", ".log", ".diff", ".patch",
+        ".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".webp", ".gif"
     }
 
     # ──────────────────────────────────────────────
@@ -88,9 +95,8 @@ class DocumentParser:
         Server-side validation:
         1. Checks file size
         2. Sanitizes filename
-        3. Verifies file extension is supported
-        4. Verifies actual binary magic bytes / MIME signatures
-        5. Protects against zip bombs, executable headers, and malicious payloads
+        3. Accepts ANY file extension (with universal fallbacks)
+        4. Verifies actual binary magic bytes when applicable to prevent zip bombs
         Returns: (clean_filename, extension)
         """
         # 1. Size verification
@@ -105,71 +111,16 @@ class DocumentParser:
         clean_filename = cls.sanitize_filename(raw_filename)
         ext = os.path.splitext(clean_filename)[1].lower()
 
-        # 3. Extension check
-        if ext not in cls.SUPPORTED_TYPES:
-            raise ValueError(
-                f"Unsupported file type '{ext}'. Supported formats: {', '.join(sorted(cls.SUPPORTED_TYPES))}"
-            )
-
-        # 4. Binary signature (magic bytes) verification
-        if ext == ".pdf":
-            # PDF must contain %PDF- near beginning
-            if not file_bytes.startswith(b"%PDF-") and b"%PDF-" not in file_bytes[:1024]:
-                raise ValueError("File failed MIME verification: Invalid PDF header signature.")
-
-        elif ext == ".docx":
-            if not file_bytes.startswith(b"PK\x03\x04"):
-                raise ValueError("File failed MIME verification: Invalid DOCX signature.")
+        # 3. Zip package verification (DOCX, PPTX, XLSX, EPUB) to protect against decompression bombs
+        if ext in (".docx", ".pptx", ".xlsx", ".epub") or file_bytes.startswith(b"PK\x03\x04"):
             try:
                 with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
-                    namelist = zf.namelist()
-                    if not any("word/document.xml" in n or "[Content_Types].xml" in n for n in namelist):
-                        raise ValueError("File failed verification: Corrupted or invalid Word DOCX package.")
-                    # Decompression bomb prevention
                     total_uncompressed = sum(info.file_size for info in zf.infolist())
                     if total_uncompressed > max_size_bytes * 10:
-                        raise ValueError("File rejected: Suspected decompression bomb in DOCX.")
+                        raise ValueError("File rejected: Suspected decompression bomb in archive package.")
             except zipfile.BadZipFile:
-                raise ValueError("File failed verification: Corrupted ZIP/DOCX archive.")
-
-        elif ext == ".xlsx":
-            if not file_bytes.startswith(b"PK\x03\x04"):
-                raise ValueError("File failed MIME verification: Invalid XLSX signature.")
-            try:
-                with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
-                    namelist = zf.namelist()
-                    if not any("xl/workbook.xml" in n or "[Content_Types].xml" in n for n in namelist):
-                        raise ValueError("File failed verification: Corrupted or invalid Excel XLSX package.")
-                    total_uncompressed = sum(info.file_size for info in zf.infolist())
-                    if total_uncompressed > max_size_bytes * 10:
-                        raise ValueError("File rejected: Suspected decompression bomb in XLSX.")
-            except zipfile.BadZipFile:
-                raise ValueError("File failed verification: Corrupted ZIP/XLSX archive.")
-
-        elif ext in (".png",):
-            if not file_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
-                raise ValueError("File failed MIME verification: Invalid PNG signature.")
-
-        elif ext in (".jpg", ".jpeg"):
-            if not file_bytes.startswith(b"\xff\xd8\xff"):
-                raise ValueError("File failed MIME verification: Invalid JPEG signature.")
-
-        elif ext == ".bmp":
-            if not file_bytes.startswith(b"BM"):
-                raise ValueError("File failed MIME verification: Invalid BMP signature.")
-
-        elif ext == ".tiff":
-            if not (file_bytes.startswith(b"II*\x00") or file_bytes.startswith(b"MM\x00*")):
-                raise ValueError("File failed MIME verification: Invalid TIFF signature.")
-
-        elif ext in (".txt", ".md", ".csv", ".html", ".htm"):
-            # Check for executable headers (Windows PE / Linux ELF / Mach-O / Java Class)
-            if file_bytes.startswith(b"MZ") or file_bytes.startswith(b"\x7fELF") or file_bytes.startswith(b"\xca\xfe\xba\xbe"):
-                raise ValueError("Executable binary files cannot be uploaded as plain text.")
-            # Check for excessive null bytes (indicative of binary/compiled payload)
-            null_count = file_bytes[:4096].count(b"\x00")
-            if null_count > 10:
-                raise ValueError("File appears to be a binary executable, not valid plain text.")
+                # If extension claimed to be docx/pptx/xlsx/epub but isn't a valid zip, allow universal fallback parsing
+                pass
 
         return clean_filename, ext
 
@@ -179,33 +130,51 @@ class DocumentParser:
 
     def parse(self, file_path: str, filename: str) -> Tuple[str, Dict[str, Any]]:
         """
-        Parse a document and return (full_text, metadata).
-        metadata includes: title, source, page_count, word_count, file_type
+        Parse ANY document and return (full_text, metadata).
+        Guaranteed never to crash on any arbitrary file format.
         """
         ext = os.path.splitext(filename)[1].lower()
 
-        if ext not in self.SUPPORTED_TYPES:
-            raise ValueError(
-                f"Unsupported file type '{ext}'. "
-                f"Supported: {', '.join(sorted(self.SUPPORTED_TYPES))}"
-            )
-
+        # PDF documents
         if ext == ".pdf":
             return self._parse_pdf(file_path, filename)
+        # Word documents
         elif ext == ".docx":
             return self._parse_docx(file_path, filename)
-        elif ext in (".txt", ".md"):
-            return self._parse_text(file_path, filename)
+        # PowerPoint presentations
+        elif ext in (".pptx", ".ppt", ".odp"):
+            return self._parse_pptx(file_path, filename)
+        # Spreadsheets & tabular data
+        elif ext in (".xlsx", ".xls", ".xlsm"):
+            return self._parse_xlsx(file_path, filename)
+        elif ext in (".csv", ".tsv"):
+            return self._parse_csv(file_path, filename)
+        # Web & markup documents
         elif ext in (".html", ".htm"):
             return self._parse_html(file_path, filename)
-        elif ext == ".csv":
-            return self._parse_csv(file_path, filename)
-        elif ext == ".xlsx":
-            return self._parse_xlsx(file_path, filename)
-        elif ext in (".png", ".jpg", ".jpeg", ".bmp", ".tiff"):
+        elif ext in (".txt", ".md", ".rst"):
+            return self._parse_text(file_path, filename)
+        elif ext == ".epub":
+            return self._parse_epub(file_path, filename)
+        elif ext == ".rtf":
+            return self._parse_rtf(file_path, filename)
+        # Structured data & configs
+        elif ext in (".json", ".jsonl", ".xml", ".yaml", ".yml", ".toml", ".ini", ".conf", ".cfg", ".env"):
+            return self._parse_structured(file_path, filename, ext)
+        # Source code & script files
+        elif ext in (
+            ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".c", ".cpp", ".h", ".hpp",
+            ".cs", ".go", ".rs", ".rb", ".php", ".sh", ".bash", ".zsh", ".ps1", ".bat",
+            ".sql", ".r", ".swift", ".kt", ".dart", ".scala", ".lua", ".css", ".scss",
+            ".sass", ".less", ".diff", ".patch", ".tex", ".latex", ".log"
+        ):
+            return self._parse_code(file_path, filename, ext)
+        # Images (OCR)
+        elif ext in (".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".webp", ".gif"):
             return self._parse_image(file_path, filename)
 
-        raise ValueError(f"Unhandled file type: {ext}")
+        # Universal fallback for any other file extension or binary file
+        return self._parse_universal_fallback(file_path, filename, ext)
 
     def parse_url(self, url: str) -> Tuple[str, Dict[str, Any]]:
         """
@@ -527,6 +496,239 @@ class DocumentParser:
             return full_text, metadata
         finally:
             xls.close()
+
+    def _parse_pptx(self, path: str, filename: str) -> Tuple[str, Dict]:
+        """Parse PowerPoint presentations (PPTX / PPT / ODP)."""
+        slides_text = []
+        slide_count = 0
+        try:
+            from pptx import Presentation
+            prs = Presentation(path)
+            slide_count = len(prs.slides)
+            for idx, slide in enumerate(prs.slides, 1):
+                slide_lines = []
+                title_shape = getattr(slide.shapes, "title", None)
+                if title_shape and title_shape.text.strip():
+                    slide_lines.append(f"# Slide {idx}: {title_shape.text.strip()}")
+                else:
+                    slide_lines.append(f"# Slide {idx}")
+
+                for shape in slide.shapes:
+                    if shape == title_shape:
+                        continue
+                    if shape.has_text_frame and shape.text_frame and shape.text_frame.text.strip():
+                        slide_lines.append(shape.text_frame.text.strip())
+                    elif shape.has_table and shape.table:
+                        table_rows = []
+                        for row in shape.table.rows:
+                            cells = [cell.text.strip() for cell in row.cells]
+                            table_rows.append(" | ".join(cells))
+                        if table_rows:
+                            slide_lines.append("\n".join(table_rows))
+
+                # Presenter speaker notes
+                if getattr(slide, "has_notes_slide", False) and slide.notes_slide:
+                    notes_frame = getattr(slide.notes_slide, "notes_text_frame", None)
+                    if notes_frame and notes_frame.text.strip():
+                        slide_lines.append(f"> Presenter Notes: {notes_frame.text.strip()}")
+
+                slides_text.append("\n\n".join(slide_lines))
+        except Exception as exc:
+            logger.warning("python-pptx parse failed for '%s', using zip XML fallback: %s", filename, exc)
+            # Fallback for PPTX archives: extract XML slide text directly
+            try:
+                with zipfile.ZipFile(path, "r") as zf:
+                    slide_names = [n for n in zf.namelist() if n.startswith("ppt/slides/slide") and n.endswith(".xml")]
+                    slide_count = len(slide_names)
+                    for sname in sorted(slide_names):
+                        xml_bytes = zf.read(sname)
+                        # Extract all text inside <a:t> elements
+                        texts = re.findall(r"<a:t[^>]*>(.*?)</a:t>", xml_bytes.decode("utf-8", errors="ignore"))
+                        if texts:
+                            slides_text.append("\n".join(texts))
+            except Exception as zip_exc:
+                logger.warning("PPTX XML fallback failed for '%s': %s", filename, zip_exc)
+
+        if not slides_text:
+            # Last resort: extract printable ASCII/Unicode chunks
+            return self._parse_universal_fallback(path, filename, ".pptx")
+
+        full_text = self._clean_text("\n\n---\n\n".join(slides_text))
+        metadata = {
+            "title": filename,
+            "source": filename,
+            "file_type": "pptx",
+            "page_count": max(1, slide_count),
+            "word_count": len(full_text.split()),
+        }
+        return full_text, metadata
+
+    def _parse_epub(self, path: str, filename: str) -> Tuple[str, Dict]:
+        """Parse EPUB electronic books."""
+        from bs4 import BeautifulSoup
+
+        chapters = []
+        try:
+            with zipfile.ZipFile(path, "r") as zf:
+                for name in sorted(zf.namelist()):
+                    if name.endswith((".xhtml", ".html", ".htm")):
+                        try:
+                            raw = zf.read(name).decode("utf-8", errors="ignore")
+                            soup = BeautifulSoup(raw, "html.parser")
+                            for tag in soup(["script", "style"]):
+                                tag.decompose()
+                            text = soup.get_text(separator="\n", strip=True)
+                            if text:
+                                chapters.append(text)
+                        except Exception:
+                            pass
+        except Exception as exc:
+            logger.warning("EPUB parsing failed for '%s': %s", filename, exc)
+            return self._parse_universal_fallback(path, filename, ".epub")
+
+        full_text = self._clean_text("\n\n---\n\n".join(chapters))
+        if not full_text:
+            full_text = f"(EPUB '{filename}' contains no extractable chapter text.)"
+
+        metadata = {
+            "title": filename,
+            "source": filename,
+            "file_type": "epub",
+            "page_count": max(1, len(chapters)),
+            "word_count": len(full_text.split()),
+        }
+        return full_text, metadata
+
+    def _parse_rtf(self, path: str, filename: str) -> Tuple[str, Dict]:
+        """Parse Rich Text Format (.rtf) documents."""
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+        except Exception:
+            with open(path, "r", encoding="latin-1", errors="ignore") as f:
+                content = f.read()
+
+        # Remove RTF control words and groups
+        text = re.sub(r"\{\*?\\[^{}]+;?\}", "", content)
+        text = re.sub(r"\\[a-zA-Z]+(-?\d+)? ?|\\[{}\\]", "", text)
+        text = re.sub(r"[{}]", "", text)
+        text = self._clean_text(text)
+        if not text:
+            text = f"(RTF file '{filename}' contains no readable text.)"
+
+        metadata = {
+            "title": filename,
+            "source": filename,
+            "file_type": "rtf",
+            "page_count": 1,
+            "word_count": len(text.split()),
+        }
+        return text, metadata
+
+    def _parse_structured(self, path: str, filename: str, ext: str) -> Tuple[str, Dict]:
+        """Parse JSON, YAML, TOML, INI, XML data structures."""
+        import json
+
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                raw = f.read()
+        except Exception:
+            with open(path, "r", encoding="latin-1", errors="replace") as f:
+                raw = f.read()
+
+        clean_type = ext.lstrip(".").upper()
+        if ext in (".json", ".jsonl"):
+            try:
+                parsed = json.loads(raw)
+                formatted = json.dumps(parsed, indent=2)
+                full_text = f"# JSON Data: {filename}\n\n```json\n{formatted[:35000]}\n```"
+            except Exception:
+                full_text = f"# Data File ({clean_type}): {filename}\n\n```json\n{raw[:35000]}\n```"
+        else:
+            full_text = f"# Configuration File ({clean_type}): {filename}\n\n```{clean_type.lower()}\n{raw[:35000]}\n```"
+
+        full_text = self._clean_text(full_text)
+        metadata = {
+            "title": filename,
+            "source": filename,
+            "file_type": ext.lstrip("."),
+            "page_count": 1,
+            "word_count": len(full_text.split()),
+        }
+        return full_text, metadata
+
+    def _parse_code(self, path: str, filename: str, ext: str) -> Tuple[str, Dict]:
+        """Parse source code, script, and technical markup files."""
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                raw = f.read()
+        except Exception:
+            with open(path, "r", encoding="latin-1", errors="replace") as f:
+                raw = f.read()
+
+        lines = raw.splitlines()
+        lang = ext.lstrip(".")
+        full_text = f"# Code File: {filename} ({len(lines)} lines)\n\n```{lang}\n{raw}\n```"
+        full_text = self._clean_text(full_text)
+
+        metadata = {
+            "title": filename,
+            "source": filename,
+            "file_type": lang,
+            "page_count": max(1, len(lines) // 50),
+            "word_count": len(full_text.split()),
+            "line_count": len(lines),
+        }
+        return full_text, metadata
+
+    def _parse_universal_fallback(self, path: str, filename: str, ext: str) -> Tuple[str, Dict]:
+        """
+        Universal fallback parser for ANY file format (binary, proprietary, unknown).
+        Guarantees that no file will ever fail to be accepted and indexed.
+        """
+        try:
+            with open(path, "rb") as f:
+                raw_bytes = f.read()
+        except Exception as exc:
+            return f"(Unable to read file '{filename}': {exc})", {
+                "title": filename,
+                "source": filename,
+                "file_type": ext.lstrip(".") if ext else "unknown",
+                "page_count": 1,
+                "word_count": 0,
+            }
+
+        # Attempt decoding with standard text encodings
+        text = ""
+        for enc in ("utf-8", "utf-16", "latin-1", "cp1252"):
+            try:
+                candidate = raw_bytes.decode(enc)
+                printable = sum(1 for ch in candidate if ch.isprintable() or ch in "\n\r\t")
+                if len(candidate) > 0 and (printable / len(candidate)) >= 0.65:
+                    text = candidate
+                    break
+            except Exception:
+                continue
+
+        # If binary or non-printable, extract printable ASCII/Unicode chunks
+        if not text or len(text.strip()) < 10:
+            extracted_strings = re.findall(rb"[\x20-\x7e\n\t]{4,}", raw_bytes)
+            ascii_lines = [s.decode("ascii", errors="ignore").strip() for s in extracted_strings[:3000] if s.strip()]
+            if ascii_lines:
+                header = f"# Document: {filename}\nFile Size: {len(raw_bytes):,} bytes\n\n## Extracted Text Chunks:\n\n"
+                text = header + "\n".join(ascii_lines)
+            else:
+                text = f"# Document: {filename}\nFile Size: {len(raw_bytes):,} bytes\n(Binary document indexed for retrieval.)"
+
+        text = self._clean_text(text)
+        metadata = {
+            "title": filename,
+            "source": filename,
+            "file_type": ext.lstrip(".") if ext else "document",
+            "page_count": 1,
+            "word_count": len(text.split()),
+        }
+        return text, metadata
 
     # ──────────────────────────────────────────────
     # Helpers

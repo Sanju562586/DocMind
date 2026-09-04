@@ -9,6 +9,7 @@ _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 class ChatRequest(BaseModel):
     session_id: str = Field(..., min_length=36, max_length=36)
     message: str = Field(..., min_length=1, max_length=8_000)
+    use_global_memory: bool = Field(default=True)
 
     @field_validator("session_id")
     @classmethod

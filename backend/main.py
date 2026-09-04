@@ -671,14 +671,31 @@ async def chat(request: Request, body: ChatRequest):
     if not query:
         raise HTTPException(status_code=400, detail="Message cannot be empty")
 
-    # 1. Retrieve session document chunks
-    retrieved_chunks = await asyncio.to_thread(retriever.retrieve, body.session_id, query)
+    use_global = getattr(body, "use_global_memory", True)
 
-    # 2. Retrieve user-isolated global cross-session memory
-    all_other_memories = store.get_all_global_memories(user_id=user["user_id"], exclude_session_id=body.session_id)
-    recalled_memories = await asyncio.to_thread(
-        retriever.retrieve_global_memory, query, all_other_memories, top_k=3
-    )
+    # 1. Retrieve document chunks (either global across all user documents or current chat only)
+    if use_global:
+        try:
+            all_user_sessions = store.list_sessions(user_id=user["user_id"])
+            other_session_ids = [s["id"] for s in all_user_sessions if s["id"] != body.session_id]
+        except Exception:
+            other_session_ids = []
+
+        retrieved_chunks = await asyncio.to_thread(
+            retriever.retrieve, body.session_id, query, additional_session_ids=other_session_ids
+        )
+
+        # 2. Retrieve user-isolated global cross-session memory
+        all_other_memories = store.get_all_global_memories(user_id=user["user_id"], exclude_session_id=body.session_id)
+        recalled_memories = await asyncio.to_thread(
+            retriever.retrieve_global_memory, query, all_other_memories, top_k=3
+        )
+    else:
+        # Strictly session-only memory: only documents and chat history in this current conversation
+        retrieved_chunks = await asyncio.to_thread(
+            retriever.retrieve, body.session_id, query, additional_session_ids=None
+        )
+        recalled_memories = []
 
     # Build Document Context
     if retrieved_chunks:
@@ -689,7 +706,10 @@ async def chat(request: Request, body: ChatRequest):
             doc_parts.append(f"[Source {i} | Doc: {doc_name} | {section}]\n{r['parent_text']}")
         doc_context = "\n\n".join(doc_parts)
     else:
-        doc_context = "(No documents attached to this chat session yet. Relying on user input and global cross-session memory.)"
+        if use_global:
+            doc_context = "(No documents attached to this chat session or previous sessions yet.)"
+        else:
+            doc_context = "(No documents attached to this current chat session yet. Current Chat Only mode active.)"
 
     # Build Global Memory Context
     if recalled_memories:
@@ -698,7 +718,10 @@ async def chat(request: Request, body: ChatRequest):
             mem_parts.append(f"- [From Previous Chat: \"{m['session_title']}\"]: {m['content']}")
         memory_context = "\n".join(mem_parts)
     else:
-        memory_context = "(No relevant past cross-session memory found for this query.)"
+        if use_global:
+            memory_context = "(No relevant past cross-session memory found for this query.)"
+        else:
+            memory_context = "(Current Chat Only mode active. Global memory and past session insights are excluded.)"
 
     # System instruction
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
@@ -740,6 +763,13 @@ async def chat(request: Request, body: ChatRequest):
             for r in retrieved_chunks
         ]
         memory_payload = recalled_memories
+
+        # Emit active memory scope metadata
+        yield _sse({
+            "type": "meta",
+            "use_global_memory": use_global,
+            "scope": "global" if use_global else "session_only",
+        })
 
         # Send recalled memory & sources metadata to frontend
         if memory_payload:

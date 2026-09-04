@@ -414,7 +414,8 @@ export async function sendMessage(
   sessionId: string,
   message: string,
   keys: Partial<ApiKeys> | undefined,
-  callbacks: ChatStreamCallbacks
+  callbacks: ChatStreamCallbacks,
+  useGlobalMemory: boolean = true
 ): Promise<void> {
   try {
     const headers = buildHeaders(keys);
@@ -422,7 +423,11 @@ export async function sendMessage(
     const res = await fetch(`${API_BASE}/chat`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ session_id: sessionId, message }),
+      body: JSON.stringify({
+        session_id: sessionId,
+        message,
+        use_global_memory: useGlobalMemory,
+      }),
     });
 
     if (!res.ok) {

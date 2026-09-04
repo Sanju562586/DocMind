@@ -319,20 +319,11 @@ export function DocumentUploadModal({
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop: (accepted) => accepted[0] && processFile(accepted[0]),
-    accept: {
-      "application/pdf": [".pdf"],
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],
-      "text/plain": [".txt"],
-      "text/markdown": [".md"],
-      "text/html": [".html", ".htm"],
-      "text/csv": [".csv"],
-      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
-    },
     multiple: false,
     disabled: stage === "uploading",
   });
 
-  const fileTypes = ["PDF", "DOCX", "TXT", "MD", "HTML", "CSV", "XLSX"];
+  const fileTypes = ["PDF", "PPT/X", "DOC/X", "XLS/X", "CSV", "CODE", "ANY FILE"];
 
   return (
     <motion.div
@@ -362,7 +353,7 @@ export function DocumentUploadModal({
             </motion.div>
             <div>
               <span className="modal-title">Attach Document to Chat</span>
-              <div className="modal-subtitle">Server-Side MIME Verification &amp; Sanitization</div>
+              <div className="modal-subtitle">PDF, PPT, Word, Excel, Code, or Any File</div>
             </div>
           </div>
           {stage !== "uploading" && (
@@ -380,7 +371,7 @@ export function DocumentUploadModal({
         </div>
 
         <p className="modal-description">
-          Uploaded files undergo server-side magic byte inspection, path sanitization, and are partitioned exclusively to this session.
+          Attach any file to this conversation at any time. DocMind will parse, chunk, and index it immediately for Q&amp;A.
         </p>
 
         {/* Dropzone */}

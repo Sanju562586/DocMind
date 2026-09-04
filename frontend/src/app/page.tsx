@@ -24,6 +24,7 @@ import {
   Edit3,
   X,
   Share2,
+  Globe,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import Sidebar from "@/components/Sidebar";
@@ -149,6 +150,15 @@ export default function HomePage() {
   const [isChatSearchOpen, setIsChatSearchOpen] = useState(false);
   const [chatSearchQuery, setChatSearchQuery] = useState("");
   const [isShareModalOpen, setIsShareModalOpen] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [isUploadingMidChat, setIsUploadingMidChat] = useState(false);
+  const [useGlobalMemory, setUseGlobalMemory] = useState<boolean>(() => {
+    if (typeof window !== "undefined") {
+      const saved = localStorage.getItem("docmind_use_global_memory");
+      return saved !== null ? saved === "true" : true;
+    }
+    return true;
+  });
 
   // Handler functions for upgrade tools
   const handleOpenQuiz = async () => {
@@ -597,44 +607,50 @@ export default function HomePage() {
     let capturedMemories: MemoryItem[] = [];
 
     try {
-      await sendMessage(session.id, text, apiKeys, {
-        onToken: (token) => {
-          fullContent += token;
-          setStreamingContent(fullContent);
+      await sendMessage(
+        session.id,
+        text,
+        apiKeys,
+        {
+          onToken: (token) => {
+            fullContent += token;
+            setStreamingContent(fullContent);
+          },
+          onSources: (srcs) => {
+            capturedSources = srcs;
+          },
+          onMemoryRecalled: (mems) => {
+            capturedMemories = mems;
+            setStreamingMemories(mems);
+          },
+          onDone: () => {
+            setIsStreaming(false);
+            setStreamingContent("");
+            setStreamingMemories([]);
+            const assistantMsg: Message = {
+              id: `assistant-${Date.now()}`,
+              session_id: session!.id,
+              role: "assistant",
+              content: fullContent,
+              created_at: new Date().toISOString(),
+              sources: capturedSources,
+              memory_recalled: capturedMemories,
+            };
+            setMessages((prev) => [...prev, assistantMsg]);
+            listSessions().then(setSessions).catch((err) => console.warn("Failed to refresh sessions list:", err));
+          },
+          onError: (errMsg) => {
+            setIsStreaming(false);
+            setStreamingContent("");
+            setStreamingMemories([]);
+            setError(errMsg);
+            if (errMsg.toLowerCase().includes("no api key") || errMsg.toLowerCase().includes("api keys")) {
+              setModal("settings");
+            }
+          },
         },
-        onSources: (srcs) => {
-          capturedSources = srcs;
-        },
-        onMemoryRecalled: (mems) => {
-          capturedMemories = mems;
-          setStreamingMemories(mems);
-        },
-        onDone: () => {
-          setIsStreaming(false);
-          setStreamingContent("");
-          setStreamingMemories([]);
-          const assistantMsg: Message = {
-            id: `assistant-${Date.now()}`,
-            session_id: session!.id,
-            role: "assistant",
-            content: fullContent,
-            created_at: new Date().toISOString(),
-            sources: capturedSources,
-            memory_recalled: capturedMemories,
-          };
-          setMessages((prev) => [...prev, assistantMsg]);
-          listSessions().then(setSessions).catch((err) => console.warn("Failed to refresh sessions list:", err));
-        },
-        onError: (errMsg) => {
-          setIsStreaming(false);
-          setStreamingContent("");
-          setStreamingMemories([]);
-          setError(errMsg);
-          if (errMsg.toLowerCase().includes("no api key") || errMsg.toLowerCase().includes("api keys")) {
-            setModal("settings");
-          }
-        },
-      });
+        useGlobalMemory
+      );
     } catch (err) {
       console.warn("Chat transmission error:", err);
       setIsStreaming(false);
@@ -808,8 +824,18 @@ export default function HomePage() {
       setSessions((prev) =>
         prev.map((s) => (s.id === activeSession.id ? updatedSession : s))
       );
+
+      // Post in-chat system notification announcing document attachment mid-conversation
+      const sysMsg: Message = {
+        id: `doc-attach-${doc.doc_id || Date.now()}`,
+        session_id: activeSession.id,
+        role: "system",
+        content: `Attached "${doc.filename}" to this conversation. The knowledge has been indexed for Q&A.`,
+        created_at: new Date().toISOString(),
+      };
+      setMessages((prev) => [...prev, sysMsg]);
     }
-    showToast(`Attached ${doc.filename} successfully`);
+    showToast(`Attached ${doc.filename} successfully`, "success");
   };
 
   // ── Background Polling ──────────────────────────────────────────────────────
@@ -894,13 +920,13 @@ export default function HomePage() {
   const handleWorkspaceDrop = async (e: React.DragEvent) => {
     e.preventDefault();
     setIsDraggingFile(false);
-    const file = e.dataTransfer.files?.[0];
-    if (!file) return;
+    const files = e.dataTransfer.files;
+    if (!files || files.length === 0) return;
 
     let targetSessionId = activeSession?.id;
     if (!targetSessionId) {
       try {
-        const newId = await createSession(file.name.replace(/\.[^/.]+$/, ""));
+        const newId = await createSession(files[0].name.replace(/\.[^/.]+$/, ""));
         const updatedList = await listSessions();
         setSessions(updatedList);
         const s = updatedList.find((item) => item.id === newId);
@@ -912,12 +938,54 @@ export default function HomePage() {
       }
     }
 
-    try {
-      showToast(`Uploading ${file.name}…`);
-      const doc = await uploadDocumentToSession(targetSessionId, file, apiKeys);
-      handleDocumentAttached(doc);
-    } catch (err) {
-      setError((err as Error).message || "Document upload failed");
+    setIsUploadingMidChat(true);
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      try {
+        showToast(`Uploading ${file.name}…`, "info");
+        const doc = await uploadDocumentToSession(targetSessionId, file, apiKeys);
+        handleDocumentAttached(doc);
+      } catch (err) {
+        setError((err as Error).message || `Upload failed for ${file.name}`);
+      }
+    }
+    setIsUploadingMidChat(false);
+  };
+
+  // ── Native File Input (Paperclip Click) ─────────────────────────────────────
+  const handleFileInputChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    let targetSessionId = activeSession?.id;
+    if (!targetSessionId) {
+      try {
+        const newId = await createSession(files[0].name.replace(/\.[^/.]+$/, ""));
+        const updatedList = await listSessions();
+        setSessions(updatedList);
+        const s = updatedList.find((item) => item.id === newId);
+        if (s) setActiveSession(s);
+        targetSessionId = newId;
+      } catch {
+        setError("Failed to create conversation for uploaded document");
+        return;
+      }
+    }
+
+    setIsUploadingMidChat(true);
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      try {
+        showToast(`Uploading ${file.name}…`, "info");
+        const doc = await uploadDocumentToSession(targetSessionId, file, apiKeys);
+        handleDocumentAttached(doc);
+      } catch (err: any) {
+        setError(err?.message || `Upload failed for ${file.name}`);
+      }
+    }
+    setIsUploadingMidChat(false);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
     }
   };
 
@@ -1446,12 +1514,117 @@ export default function HomePage() {
               {/* Chat Input Floating Command Bar */}
               <div className="input-area">
                 <div className="input-container">
+                  {/* Knowledge Scope Toggle Bar & Mid-Chat Upload Indicator */}
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      padding: "0 6px 8px",
+                      fontSize: 11,
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <span style={{ color: "rgba(255, 255, 255, 0.4)", fontWeight: 500 }}>
+                        Memory Scope:
+                      </span>
+                      <div
+                        style={{
+                          display: "inline-flex",
+                          background: "rgba(255, 255, 255, 0.05)",
+                          borderRadius: 7,
+                          padding: 2,
+                          border: "1px solid rgba(255, 255, 255, 0.09)",
+                        }}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setUseGlobalMemory(true);
+                            if (typeof window !== "undefined") {
+                              localStorage.setItem("docmind_use_global_memory", "true");
+                            }
+                            showToast("Global Knowledge active: all previous documents & chats will be searched", "info");
+                          }}
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 5,
+                            padding: "3px 8px",
+                            borderRadius: 5,
+                            border: "none",
+                            background: useGlobalMemory ? "#FFFFFF" : "transparent",
+                            color: useGlobalMemory ? "#000000" : "rgba(255, 255, 255, 0.6)",
+                            fontSize: 11,
+                            fontWeight: 600,
+                            cursor: "pointer",
+                            transition: "all 0.15s ease",
+                          }}
+                          title="Search knowledge from all previously uploaded documents + past conversation insights"
+                        >
+                          <Globe size={11} color={useGlobalMemory ? "#000000" : "currentColor"} />
+                          <span>Global Knowledge (All Docs)</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setUseGlobalMemory(false);
+                            if (typeof window !== "undefined") {
+                              localStorage.setItem("docmind_use_global_memory", "false");
+                            }
+                            showToast("Current Chat Only active: strictly queries this conversation", "info");
+                          }}
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 5,
+                            padding: "3px 8px",
+                            borderRadius: 5,
+                            border: "none",
+                            background: !useGlobalMemory ? "#FFFFFF" : "transparent",
+                            color: !useGlobalMemory ? "#000000" : "rgba(255, 255, 255, 0.6)",
+                            fontSize: 11,
+                            fontWeight: 600,
+                            cursor: "pointer",
+                            transition: "all 0.15s ease",
+                          }}
+                          title="Strictly query only documents and messages belonging to this current chat"
+                        >
+                          <FileText size={11} color={!useGlobalMemory ? "#000000" : "currentColor"} />
+                          <span>Current Chat Only</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      {isUploadingMidChat && (
+                        <div style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "#60A5FA", fontSize: 11 }}>
+                          <div className="spin" style={{ width: 10, height: 10, border: "1.5px solid #60A5FA", borderTopColor: "transparent", borderRadius: "50%" }} />
+                          <span>Uploading &amp; Indexing…</span>
+                        </div>
+                      )}
+                      {currentDocs.length > 0 && !isUploadingMidChat && (
+                        <span style={{ color: "rgba(255, 255, 255, 0.4)", fontSize: 10.5 }}>
+                          {currentDocs.length} {currentDocs.length === 1 ? "document" : "documents"} attached
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  <input
+                    type="file"
+                    multiple
+                    ref={fileInputRef}
+                    onChange={handleFileInputChange}
+                    style={{ display: "none" }}
+                  />
+
                   <div className="input-box-wrapper">
                     <motion.button
                       className="input-action-btn"
-                      onClick={handleOpenUploadModal}
-                      title="Attach document to this conversation"
-                      disabled={isStreaming}
+                      onClick={() => fileInputRef.current?.click()}
+                      title="Attach documents to this conversation at any time (PDF, PPT, DOCX, Code, or any file)"
+                      disabled={isStreaming || isUploadingMidChat}
                       whileHover={{ scale: 1.15 }}
                       whileTap={{ scale: 0.88 }}
                       transition={{ type: "spring", stiffness: 450, damping: 20 }}
