@@ -1,16 +1,49 @@
+import os
 from pydantic_settings import BaseSettings
 from typing import Optional, List
 from functools import lru_cache
+
+_BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+_DEFAULT_DB_PATH = os.path.join(_BACKEND_DIR, "data", "summarizer.db")
+_DEFAULT_UPLOAD_DIR = os.path.join(_BACKEND_DIR, "data", "uploads")
+_DEFAULT_INDEX_DIR = os.path.join(_BACKEND_DIR, "data", "indexes")
 
 
 class Settings(BaseSettings):
     app_name: str = "DocMind Document Intelligence"
 
     # Storage & Database configuration
-    database_path: str = "./data/summarizer.db"
+    database_path: str = _DEFAULT_DB_PATH
     database_url: Optional[str] = None  # e.g., postgresql://user:password@localhost:5432/docmind
-    upload_dir: str = "./data/uploads"
-    index_dir: str = "./data/indexes"
+    upload_dir: str = _DEFAULT_UPLOAD_DIR
+    index_dir: str = _DEFAULT_INDEX_DIR
+
+    @property
+    def resolved_database_path(self) -> str:
+        if os.path.isabs(self.database_path):
+            return self.database_path
+        candidate = os.path.join(_BACKEND_DIR, self.database_path.lstrip("./"))
+        if os.path.exists(candidate) or os.path.exists(os.path.dirname(candidate)):
+            return candidate
+        return os.path.abspath(self.database_path)
+
+    @property
+    def resolved_upload_dir(self) -> str:
+        if os.path.isabs(self.upload_dir):
+            return self.upload_dir
+        candidate = os.path.join(_BACKEND_DIR, self.upload_dir.lstrip("./"))
+        if os.path.exists(candidate) or os.path.exists(os.path.dirname(candidate)):
+            return candidate
+        return os.path.abspath(self.upload_dir)
+
+    @property
+    def resolved_index_dir(self) -> str:
+        if os.path.isabs(self.index_dir):
+            return self.index_dir
+        candidate = os.path.join(_BACKEND_DIR, self.index_dir.lstrip("./"))
+        if os.path.exists(candidate) or os.path.exists(os.path.dirname(candidate)):
+            return candidate
+        return os.path.abspath(self.index_dir)
 
     # LLM API keys (can be overridden per-request via headers)
     gemini_api_key: Optional[str] = None
@@ -91,7 +124,13 @@ class Settings(BaseSettings):
     parse_timeout: float = 120.0
     index_timeout: float = 180.0
 
-    model_config = {"env_file": ".env", "extra": "ignore"}
+    model_config = {
+        "env_file": (
+            os.path.join(_BACKEND_DIR, ".env"),
+            ".env",
+        ),
+        "extra": "ignore",
+    }
 
 
 @lru_cache()

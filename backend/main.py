@@ -62,11 +62,15 @@ task_queue: Optional[AsyncTaskQueue] = None
 async def lifespan(app: FastAPI):
     global parser, chunker, retriever, store, router_llm, rate_limiter, storage, task_queue
 
-    os.makedirs(settings.upload_dir, exist_ok=True)
-    os.makedirs(settings.index_dir, exist_ok=True)
+    upload_dir = settings.resolved_upload_dir
+    index_dir = settings.resolved_index_dir
+    db_path = settings.resolved_database_path
+
+    os.makedirs(upload_dir, exist_ok=True)
+    os.makedirs(index_dir, exist_ok=True)
 
     logger.info("Initializing DocMind production backend components...")
-    store = SessionStore(db_path=settings.database_path, database_url=settings.database_url)
+    store = SessionStore(db_path=db_path, database_url=settings.database_url)
     store.initialize()
 
     storage = get_storage_backend(settings)
@@ -83,7 +87,7 @@ async def lifespan(app: FastAPI):
         semantic_threshold=settings.semantic_threshold,
     )
     retriever = HybridRetriever(
-        index_dir=settings.index_dir,
+        index_dir=index_dir,
         top_k=settings.retrieval_top_k,
         candidates_k=settings.retrieval_candidates,
         max_cached_sessions=settings.max_cached_sessions,
@@ -280,6 +284,11 @@ async def create_session(body: SessionCreate, request: Request):
 @app.get("/api/sessions")
 async def list_sessions(request: Request):
     user = _get_user_info(request)
+    if store and user.get("user_id") and user["user_id"] != "default_user":
+        try:
+            store.claim_legacy_sessions(user["user_id"])
+        except Exception as exc:
+            logger.debug("Non-critical legacy session claim notice: %s", exc)
     return store.list_sessions(user_id=user["user_id"])
 
 

@@ -309,7 +309,29 @@ class SessionStore:
             return "1=1", []
         if user_id == "default_user":
             return f"({col} = ? OR {col} IS NULL)", [user_id]
-        return f"{col} = ?", [user_id]
+        # Authenticated users also see unassigned legacy / default_user sessions
+        return f"({col} = ? OR {col} = 'default_user' OR {col} IS NULL)", [user_id]
+
+    def claim_legacy_sessions(self, target_user_id: str) -> int:
+        """
+        Migrate unassigned legacy sessions (user_id = 'default_user' or NULL)
+        to the authenticated user so they persist under their profile.
+        """
+        if not target_user_id or target_user_id == "default_user":
+            return 0
+        with self._conn() as conn:
+            cur = conn.execute(
+                "UPDATE sessions SET user_id = ?, updated_at = datetime('now') WHERE user_id = 'default_user' OR user_id IS NULL",
+                (target_user_id,),
+            )
+            try:
+                conn.execute(
+                    "UPDATE global_memory SET user_id = ? WHERE user_id = 'default_user' OR user_id IS NULL",
+                    (target_user_id,),
+                )
+            except Exception:
+                pass
+            return cur.rowcount if hasattr(cur, "rowcount") else 0
 
     # ──────────────────────────────────────────────
     # Users (Google, GitHub, Credentials)
