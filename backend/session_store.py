@@ -138,6 +138,7 @@ class SessionStore:
                     file_type TEXT,
                     file_path TEXT,
                     status TEXT DEFAULT 'ready',
+                    error_message TEXT,
                     created_at TEXT DEFAULT (datetime('now')),
                     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
                 );
@@ -168,6 +169,7 @@ class SessionStore:
             # Safe migrations for existing SQLite databases
             for col_sql in [
                 "ALTER TABLE documents ADD COLUMN status TEXT DEFAULT 'ready'",
+                "ALTER TABLE documents ADD COLUMN error_message TEXT",
                 "ALTER TABLE sessions ADD COLUMN user_id TEXT DEFAULT 'default_user'",
                 "ALTER TABLE sessions ADD COLUMN is_shared INTEGER DEFAULT 0",
                 "ALTER TABLE sessions ADD COLUMN share_token TEXT",
@@ -225,6 +227,7 @@ class SessionStore:
                     file_type VARCHAR(64),
                     file_path TEXT,
                     status VARCHAR(64) DEFAULT 'ready',
+                    error_message TEXT,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 );
 
@@ -256,6 +259,21 @@ class SessionStore:
                 CREATE INDEX IF NOT EXISTS idx_memory_session ON global_memory(session_id);
                 CREATE INDEX IF NOT EXISTS idx_memory_user ON global_memory(user_id);
             """)
+
+            # Safe migrations for existing PostgreSQL databases
+            for col_sql in [
+                "ALTER TABLE documents ADD COLUMN IF NOT EXISTS status VARCHAR(64) DEFAULT 'ready'",
+                "ALTER TABLE documents ADD COLUMN IF NOT EXISTS error_message TEXT",
+                "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_id VARCHAR(128) DEFAULT 'default_user'",
+                "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS is_shared BOOLEAN DEFAULT FALSE",
+                "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS share_token VARCHAR(64) UNIQUE",
+                "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS shared_at TIMESTAMP WITH TIME ZONE",
+                "ALTER TABLE global_memory ADD COLUMN IF NOT EXISTS user_id VARCHAR(128) DEFAULT 'default_user'",
+            ]:
+                try:
+                    conn.execute(col_sql)
+                except Exception:
+                    pass
 
         logger.info("PostgreSQL database tables and indexes initialized [OK]")
 
@@ -301,6 +319,7 @@ class SessionStore:
             return {}
         d = dict(row)
         d["doc_id"] = d.get("id", "")
+        d["error_message"] = d.get("error_message")
         return d
 
     @staticmethod
@@ -380,6 +399,11 @@ class SessionStore:
         return session_id
 
     def get_session(self, session_id: str, user_id: Optional[str] = None) -> Optional[Dict]:
+        try:
+            self.cleanup_stuck_documents(max_age_seconds=300)
+        except Exception as exc:
+            logger.debug("Non-critical stuck document cleanup notice in get_session: %s", exc)
+
         with self._conn() as conn:
             if user_id:
                 clause, p = self._user_filter(user_id, "user_id")
@@ -606,13 +630,14 @@ class SessionStore:
         word_count: int = 0,
         file_type: str = "",
         file_path: str = "",
-        status: str = "processing"
+        status: str = "processing",
+        error_message: Optional[str] = None,
     ):
         with self._conn() as conn:
             conn.execute(
-                """INSERT INTO documents (id, session_id, filename, chunk_count, char_count, word_count, file_type, file_path, status)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (doc_id, session_id, filename, chunk_count, char_count, word_count, file_type, file_path, status),
+                """INSERT INTO documents (id, session_id, filename, chunk_count, char_count, word_count, file_type, file_path, status, error_message)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (doc_id, session_id, filename, chunk_count, char_count, word_count, file_type, file_path, status, error_message),
             )
         self.touch_session(session_id)
 
@@ -622,17 +647,78 @@ class SessionStore:
         chunk_count: int,
         char_count: int,
         word_count: int,
-        status: str = "ready"
+        status: str = "ready",
+        error_message: Optional[str] = None,
     ):
         with self._conn() as conn:
             conn.execute(
                 """UPDATE documents 
-                   SET chunk_count = ?, char_count = ?, word_count = ?, status = ?
+                   SET chunk_count = ?, char_count = ?, word_count = ?, status = ?, error_message = ?
                    WHERE id = ?""",
-                (chunk_count, char_count, word_count, status, doc_id),
+                (chunk_count, char_count, word_count, status, error_message, doc_id),
             )
 
+    def update_document_status(
+        self,
+        doc_id: str,
+        status: str,
+        error_message: Optional[str] = None,
+    ):
+        with self._conn() as conn:
+            conn.execute(
+                """UPDATE documents 
+                   SET status = ?, error_message = ?
+                   WHERE id = ?""",
+                (status, error_message, doc_id),
+            )
+
+    def get_stuck_documents(self) -> List[Dict[str, Any]]:
+        """Return all documents currently in 'processing' state."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM documents WHERE status = 'processing'"
+            ).fetchall()
+        return [self._format_doc(r) for r in rows]
+
+    def cleanup_stuck_documents(self, max_age_seconds: int = 300) -> int:
+        """
+        Mark any document stuck in 'processing' longer than max_age_seconds as 'error'.
+        Prevents abandoned background jobs from hanging the UI indefinitely.
+        """
+        count = 0
+        now = datetime.utcnow()
+        with self._conn() as conn:
+            rows = conn.execute("SELECT id, created_at FROM documents WHERE status = 'processing'").fetchall()
+            for r in rows:
+                doc_id = r["id"]
+                c_at_str = str(r["created_at"]) if r["created_at"] else ""
+                should_timeout = False
+                if c_at_str:
+                    try:
+                        clean_str = c_at_str.replace("T", " ").split(".")[0].split("+")[0].strip()
+                        c_time = datetime.strptime(clean_str, "%Y-%m-%d %H:%M:%S")
+                        if (now - c_time).total_seconds() > max_age_seconds:
+                            should_timeout = True
+                    except Exception:
+                        should_timeout = True
+                else:
+                    should_timeout = True
+
+                if should_timeout:
+                    conn.execute(
+                        "UPDATE documents SET status = 'error', error_message = 'Document processing timed out. Click Retry to reprocess.' WHERE id = ?",
+                        (doc_id,),
+                    )
+                    count += 1
+                    logger.warning("Document %s was stuck in 'processing' for >%ds; transitioned to 'error'", doc_id, max_age_seconds)
+        return count
+
     def list_session_documents(self, session_id: str) -> List[Dict]:
+        try:
+            self.cleanup_stuck_documents(max_age_seconds=300)
+        except Exception as exc:
+            logger.debug("Non-critical stuck document cleanup notice in list_session_documents: %s", exc)
+
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT * FROM documents WHERE session_id = ? ORDER BY created_at ASC",

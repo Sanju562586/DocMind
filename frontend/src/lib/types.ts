@@ -29,6 +29,7 @@ export interface Document {
   file_type?: string;
   status?: "processing" | "ready" | "error";
   message?: string;
+  error_message?: string;
   created_at?: string;
 }
 

@@ -49,6 +49,7 @@ import {
   sendMessage,
   summarizeSession,
   deleteDocument,
+  retryDocument,
   checkBackendHealth,
   listSessionDocuments,
   renameSession,
@@ -839,6 +840,10 @@ export default function HomePage() {
   };
 
   // ── Background Polling ──────────────────────────────────────────────────────
+  const docStatusKey = activeSession?.documents
+    ? activeSession.documents.map((d) => `${d.doc_id || (d as any).id}:${d.status}`).join(",")
+    : "";
+
   useEffect(() => {
     if (!activeSession) return;
     const hasProcessing = activeSession.documents?.some(
@@ -846,7 +851,11 @@ export default function HomePage() {
     );
     if (!hasProcessing) return;
 
+    let attempts = 0;
+    const maxAttempts = 60; // 60 * 2000ms = 120 seconds max polling
+
     const interval = setInterval(async () => {
+      attempts++;
       try {
         const docs = await listSessionDocuments(activeSession.id);
         const stillProcessing = docs.some((d) => d.status === "processing");
@@ -857,8 +866,11 @@ export default function HomePage() {
         setSessions((prev) =>
           prev.map((s) => (s.id === activeSession.id ? { ...s, documents: docs } : s))
         );
-        if (!stillProcessing) {
+        if (!stillProcessing || attempts >= maxAttempts) {
           clearInterval(interval);
+          if (stillProcessing && attempts >= maxAttempts) {
+            showToast("Document processing is taking longer than usual. You can check status or retry.", "info");
+          }
         }
       } catch (err) {
         console.warn("Background document polling notice:", err);
@@ -866,7 +878,33 @@ export default function HomePage() {
     }, 2000);
 
     return () => clearInterval(interval);
-  }, [activeSession?.id, activeSession?.documents]);
+  }, [activeSession?.id, docStatusKey]);
+
+  // ── Retry Document Processing ───────────────────────────────────────────────
+  const [retryingDocId, setRetryingDocId] = useState<string | null>(null);
+
+  const handleRetryDocument = async (docId: string) => {
+    if (!activeSession) return;
+    setRetryingDocId(docId);
+    showToast("Retrying document processing…", "info");
+    try {
+      const updatedDoc = await retryDocument(docId);
+      const updatedDocs = (activeSession.documents || []).map((d) =>
+        d.doc_id === docId || (d as any).id === docId
+          ? { ...d, ...updatedDoc, status: "processing" as const }
+          : d
+      );
+      const updatedSession = { ...activeSession, documents: updatedDocs };
+      setActiveSession(updatedSession);
+      setSessions((prev) =>
+        prev.map((s) => (s.id === activeSession.id ? updatedSession : s))
+      );
+    } catch (err: any) {
+      showToast(err?.message || "Failed to retry document processing", "error");
+    } finally {
+      setRetryingDocId(null);
+    }
+  };
 
   // ── Delete Document ─────────────────────────────────────────────────────────
   const handleDeleteDocument = async (docId: string) => {
@@ -1320,10 +1358,30 @@ export default function HomePage() {
                           <span style={{ maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600 }}>
                             {d.filename}
                           </span>
-                          {d.status === "processing" || d.chunk_count === 0 ? (
+                          {d.status === "processing" ? (
                             <span style={{ fontSize: 10, color: "#FFFFFF", display: "inline-flex", alignItems: "center", gap: 4, background: "rgba(255, 255, 255, 0.1)", padding: "1px 6px", borderRadius: 4 }}>
                               <div className="spin" style={{ width: 8, height: 8, border: "1.2px solid #FFFFFF", borderTopColor: "transparent", borderRadius: "50%" }} />
                               Processing…
+                            </span>
+                          ) : d.status === "error" ? (
+                            <span
+                              style={{ fontSize: 10, color: "#FFA07A", display: "inline-flex", alignItems: "center", gap: 4, background: "rgba(255, 99, 71, 0.15)", padding: "1px 6px", borderRadius: 4, cursor: "pointer" }}
+                              title={d.error_message || "Processing failed or timed out. Click refresh icon to retry."}
+                              onClick={() => handleRetryDocument(d.doc_id || (d as any).id)}
+                            >
+                              Failed
+                              <motion.span
+                                style={{ display: "inline-flex", alignItems: "center" }}
+                                title="Retry processing"
+                                whileHover={{ scale: 1.25 }}
+                                whileTap={{ scale: 0.85 }}
+                              >
+                                {retryingDocId === (d.doc_id || (d as any).id) ? (
+                                  <div className="spin" style={{ width: 7, height: 7, border: "1px solid #FFA07A", borderTopColor: "transparent", borderRadius: "50%" }} />
+                                ) : (
+                                  <RefreshCw size={9} color="#FFA07A" />
+                                )}
+                              </motion.span>
                             </span>
                           ) : (
                             <span style={{ fontSize: 10, color: "var(--text-muted-alt)" }}>

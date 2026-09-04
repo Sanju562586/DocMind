@@ -114,6 +114,7 @@ class Settings(BaseSettings):
     semantic_threshold: float = 0.35  # cosine distance threshold for topic boundary
 
     # Retrieval config
+    enable_neural_models: bool = True
     retrieval_candidates: int = 50    # candidates fed to cross-encoder
     retrieval_top_k: int = 5          # final results returned
 

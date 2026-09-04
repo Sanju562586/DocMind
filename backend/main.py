@@ -58,6 +58,83 @@ storage: Optional[StorageBackend] = None
 task_queue: Optional[AsyncTaskQueue] = None
 
 
+async def _process_document_background(d_id: str, s_id: str, f_path: str, f_name: str, file_type: Optional[str] = None):
+    """
+    Asynchronous document parsing, semantic chunking, and index generation.
+    Handles timeouts, cancellations, and errors cleanly with persistent status updates.
+    """
+    if file_type is None:
+        file_type = os.path.splitext(f_name)[1].lstrip(".") or "document"
+
+    try:
+        logger.info("Background processing started for '%s' (id: %s)", f_name, d_id)
+        if parser is None or chunker is None or retriever is None or store is None:
+            raise RuntimeError("Backend components not initialized")
+
+        doc_text, metadata = await asyncio.wait_for(
+            asyncio.to_thread(parser.parse, f_path, f_name),
+            timeout=settings.parse_timeout,
+        )
+        chunks = await asyncio.wait_for(
+            asyncio.to_thread(chunker.chunk_document, doc_text, d_id, s_id, metadata),
+            timeout=settings.parse_timeout,
+        )
+        await asyncio.wait_for(
+            asyncio.to_thread(retriever.index_session_chunks, s_id, chunks),
+            timeout=settings.index_timeout,
+        )
+
+        w_count = metadata.get("word_count", len(doc_text.split()))
+        store.update_document_processed(
+            doc_id=d_id,
+            chunk_count=len(chunks),
+            char_count=len(doc_text),
+            word_count=w_count,
+            status="ready",
+            error_message=None,
+        )
+        if settings.enable_metrics:
+            metrics.record_document_processed(file_type, "success")
+        logger.info("Background processing complete for '%s' [OK] (%d chunks indexed)", f_name, len(chunks))
+    except asyncio.TimeoutError:
+        logger.error("Processing timed out for document '%s'", f_name)
+        if store:
+            store.update_document_processed(
+                doc_id=d_id,
+                chunk_count=0,
+                char_count=0,
+                word_count=0,
+                status="error",
+                error_message="Document processing timed out during parsing or indexing.",
+            )
+        if settings.enable_metrics:
+            metrics.record_document_processed(file_type, "timeout")
+    except asyncio.CancelledError:
+        logger.warning("Background processing cancelled for document '%s'", f_name)
+        if store:
+            store.update_document_processed(
+                doc_id=d_id,
+                chunk_count=0,
+                char_count=0,
+                word_count=0,
+                status="error",
+                error_message="Document processing was cancelled.",
+            )
+    except Exception as exc:
+        logger.exception("Background processing failed for '%s': %s", f_name, exc)
+        if store:
+            store.update_document_processed(
+                doc_id=d_id,
+                chunk_count=0,
+                char_count=0,
+                word_count=0,
+                status="error",
+                error_message=f"Processing failed: {str(exc)}",
+            )
+        if settings.enable_metrics:
+            metrics.record_document_processed(file_type, "error")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global parser, chunker, retriever, store, router_llm, rate_limiter, storage, task_queue
@@ -91,8 +168,8 @@ async def lifespan(app: FastAPI):
         top_k=settings.retrieval_top_k,
         candidates_k=settings.retrieval_candidates,
         max_cached_sessions=settings.max_cached_sessions,
+        load_neural=settings.enable_neural_models,
     )
-    retriever.register_on_model_ready(chunker.set_embed_model)
     router_llm = LLMRouter()
 
     rate_limiter = UpstashRateLimiter(
@@ -104,6 +181,48 @@ async def lifespan(app: FastAPI):
         logger.info("Upstash Redis rate limiter initialized [OK]")
     else:
         logger.info("In-memory sliding window rate limiter initialized (Upstash credentials optional) [OK]")
+
+    # Startup recovery: Re-enqueue or cleanly fail documents left in "processing" state from prior runs
+    try:
+        stuck_docs = store.get_stuck_documents()
+        if stuck_docs:
+            logger.info("Found %d orphaned 'processing' documents from prior run. Recovering...", len(stuck_docs))
+            for sdoc in stuck_docs:
+                d_id = sdoc["id"]
+                s_id = sdoc["session_id"]
+                f_path = sdoc.get("file_path", "")
+                f_name = sdoc.get("filename", "document")
+                f_type = sdoc.get("file_type") or os.path.splitext(f_name)[1].lstrip(".") or "document"
+                file_exists = False
+                if f_path:
+                    if storage and hasattr(storage, "file_exists"):
+                        file_exists = storage.file_exists(f_path)
+                    elif os.path.exists(f_path):
+                        file_exists = True
+
+                if file_exists:
+                    logger.info("Re-enqueuing abandoned document '%s' (id: %s)", f_name, d_id)
+                    await task_queue.enqueue(
+                        f"process_document_{d_id}",
+                        _process_document_background,
+                        d_id,
+                        s_id,
+                        f_path,
+                        f_name,
+                        f_type,
+                    )
+                else:
+                    logger.warning("Abandoned document '%s' (id: %s) file missing. Marking as error.", f_name, d_id)
+                    store.update_document_processed(
+                        doc_id=d_id,
+                        chunk_count=0,
+                        char_count=0,
+                        word_count=0,
+                        status="error",
+                        error_message="Document processing was interrupted by server restart and file is missing. Please re-upload.",
+                    )
+    except Exception as exc:
+        logger.warning("Startup stuck document recovery notice: %s", exc)
 
     logger.info("All DocMind backend components ready [OK]")
     try:
@@ -125,6 +244,7 @@ cors_origins = settings.cors_origins if settings.cors_origins else ["http://loca
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
+    allow_origin_regex=r"https?://.*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -498,49 +618,6 @@ async def upload_document_to_session(
         clean_title = clean_filename.rsplit(".", 1)[0].replace("_", " ").replace("-", " ")
         store.update_session_title(session_id, clean_title[:60], user_id=user["user_id"])
 
-    # Background async processing with timeout protection
-    async def _process_document_background(d_id: str, s_id: str, f_path: str, f_name: str):
-        try:
-            logger.info("Background processing started for '%s' (id: %s)", f_name, d_id)
-            doc_text, metadata = await asyncio.wait_for(
-                asyncio.to_thread(parser.parse, f_path, f_name),
-                timeout=settings.parse_timeout,
-            )
-            chunks = await asyncio.wait_for(
-                asyncio.to_thread(chunker.chunk_document, doc_text, d_id, s_id, metadata),
-                timeout=settings.parse_timeout,
-            )
-            await asyncio.wait_for(
-                asyncio.to_thread(retriever.index_session_chunks, s_id, chunks),
-                timeout=settings.index_timeout,
-            )
-
-            w_count = metadata.get("word_count", len(doc_text.split()))
-            store.update_document_processed(
-                doc_id=d_id,
-                chunk_count=len(chunks),
-                char_count=len(doc_text),
-                word_count=w_count,
-                status="ready",
-            )
-            if settings.enable_metrics:
-                metrics.record_document_processed(file_type, "success")
-            logger.info("Background processing complete for '%s' [OK] (%d chunks indexed)", f_name, len(chunks))
-        except asyncio.TimeoutError:
-            logger.error("Processing timed out for document '%s'", f_name)
-            store.update_document_processed(
-                doc_id=d_id, chunk_count=0, char_count=0, word_count=0, status="error"
-            )
-            if settings.enable_metrics:
-                metrics.record_document_processed(file_type, "timeout")
-        except Exception as exc:
-            logger.exception("Background processing failed for '%s': %s", f_name, exc)
-            store.update_document_processed(
-                doc_id=d_id, chunk_count=0, char_count=0, word_count=0, status="error"
-            )
-            if settings.enable_metrics:
-                metrics.record_document_processed(file_type, "error")
-
     if task_queue and task_queue._running:
         await task_queue.enqueue(
             f"process_document_{doc_id}",
@@ -549,9 +626,10 @@ async def upload_document_to_session(
             session_id,
             file_path,
             clean_filename,
+            file_type,
         )
     else:
-        background_tasks.add_task(_process_document_background, doc_id, session_id, file_path, clean_filename)
+        background_tasks.add_task(_process_document_background, doc_id, session_id, file_path, clean_filename, file_type)
 
     return {
         "id": doc_id,
@@ -598,6 +676,68 @@ async def delete_document(doc_id: str, request: Request):
             except OSError:
                 pass
     return {"status": "deleted", "session_id": session_id}
+
+
+@app.post("/api/documents/{doc_id}/retry")
+async def retry_document_processing(doc_id: str, request: Request):
+    """Manually re-trigger background processing for a stuck or errored document."""
+    user = _get_user_info(request)
+    doc = store.get_document(doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    session = store.get_session(doc["session_id"], user_id=user["user_id"])
+    if not session:
+        raise HTTPException(status_code=403, detail="Unauthorized document access")
+
+    f_path = doc.get("file_path", "")
+    f_name = doc.get("filename", "document")
+    file_exists = False
+    if f_path:
+        if storage and hasattr(storage, "file_exists"):
+            file_exists = storage.file_exists(f_path)
+        elif os.path.exists(f_path):
+            file_exists = True
+
+    if not file_exists:
+        store.update_document_processed(
+            doc_id=doc_id,
+            chunk_count=0,
+            char_count=0,
+            word_count=0,
+            status="error",
+            error_message="Original file is missing from server storage. Please delete and re-upload.",
+        )
+        raise HTTPException(
+            status_code=400,
+            detail="Original file is missing from server storage. Please delete this document and re-upload."
+        )
+
+    store.update_document_status(doc_id, "processing", None)
+
+    f_type = doc.get("file_type") or os.path.splitext(f_name)[1].lstrip(".") or "document"
+    if task_queue and task_queue._running:
+        await task_queue.enqueue(
+            f"process_document_{doc_id}",
+            _process_document_background,
+            doc_id,
+            doc["session_id"],
+            f_path,
+            f_name,
+            f_type,
+        )
+    else:
+        asyncio.create_task(
+            _process_document_background(doc_id, doc["session_id"], f_path, f_name, f_type)
+        )
+
+    return {
+        "id": doc_id,
+        "doc_id": doc_id,
+        "session_id": doc["session_id"],
+        "filename": f_name,
+        "status": "processing",
+        "message": "Document reprocessing started",
+    }
 
 
 # ──────────────────────────────────────────────

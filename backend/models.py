@@ -52,6 +52,7 @@ class DocumentResponse(BaseModel):
     word_count: Optional[int] = 0
     file_type: Optional[str] = None
     status: Optional[str] = None
+    error_message: Optional[str] = None
     created_at: Optional[str] = None
 
 

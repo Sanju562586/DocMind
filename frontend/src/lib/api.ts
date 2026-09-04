@@ -108,6 +108,15 @@ async function fetchWithRetry(url: string, options?: RequestInit, retries = 2, d
       await new Promise((resolve) => setTimeout(resolve, delayMs));
       return fetchWithRetry(url, options, retries - 1, delayMs * 1.5);
     }
+    // Fallback to Next.js server proxy if direct backend request failed (e.g. CORS or network error)
+    if (API_BASE !== "/api/backend" && url.startsWith(API_BASE)) {
+      try {
+        const proxyUrl = url.replace(API_BASE, "/api/backend");
+        return await fetch(proxyUrl, finalOptions);
+      } catch {
+        // preserve original error
+      }
+    }
     throw err;
   }
 }
@@ -397,6 +406,15 @@ export async function deleteDocument(docId: string): Promise<void> {
     await handleResponse<{ status: string; session_id: string }>(res, "Failed to delete document");
   } catch (err) {
     throw new Error(parseErrorMessage(err, "Failed to delete document"));
+  }
+}
+
+export async function retryDocument(docId: string): Promise<Document> {
+  try {
+    const res = await fetchWithRetry(`${API_BASE}/documents/${docId}/retry`, { method: "POST" });
+    return await handleResponse<Document>(res, "Failed to retry document processing");
+  } catch (err) {
+    throw new Error(parseErrorMessage(err, "Failed to retry document processing"));
   }
 }
 

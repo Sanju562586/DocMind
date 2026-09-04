@@ -248,11 +248,8 @@ class HierarchicalSemanticChunker:
         if len(sentences) <= 3:
             return self._split_by_tokens(text)
 
-        # Generate embeddings or fallback subword vectors
-        if self._embed_model is not None:
-            embeddings = self._embed_model.encode(sentences, batch_size=64, show_progress_bar=False)
-        else:
-            embeddings = self._fallback_vectorizer.encode(sentences)
+        # Fast subword vectorizer for instantaneous and reliable topic-boundary detection
+        embeddings = self._fallback_vectorizer.encode(sentences)
 
         # Find topic-boundary indices
         split_positions = [0]

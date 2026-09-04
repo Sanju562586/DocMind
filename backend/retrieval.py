@@ -161,6 +161,13 @@ class HybridRetriever:
 
     def _async_load_neural_models(self):
         try:
+            try:
+                import torch
+                torch.set_num_threads(1)
+                torch.set_num_interop_threads(1)
+            except Exception:
+                pass
+
             os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
             os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
             logger.info("Initializing neural models in background (%s)...", _BI_ENCODER_MODEL)

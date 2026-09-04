@@ -13,4 +13,10 @@ services:
       - key: GEMINI_API_KEY
         sync: false
       - key: ALLOWED_ORIGINS
-        value: http://localhost:3000
+        value: https://*.vercel.app,http://localhost:3000,http://127.0.0.1:3000
+      - key: ENABLE_NEURAL_MODELS
+        value: "true"
+      - key: OMP_NUM_THREADS
+        value: "1"
+      - key: MKL_NUM_THREADS
+        value: "1"
