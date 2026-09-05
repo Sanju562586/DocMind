@@ -852,12 +852,19 @@ export default function HomePage() {
     if (!hasProcessing) return;
 
     let attempts = 0;
-    const maxAttempts = 60; // 60 * 2000ms = 120 seconds max polling
+    let consecutiveErrors = 0;
+    const maxAttempts = 40;
+    let timerId: NodeJS.Timeout | null = null;
+    let isCancelled = false;
 
-    const interval = setInterval(async () => {
+    const poll = async () => {
+      if (isCancelled) return;
       attempts++;
+      let nextDelay = 3000; // 3 seconds baseline interval
+
       try {
         const docs = await listSessionDocuments(activeSession.id);
+        consecutiveErrors = 0;
         const stillProcessing = docs.some((d) => d.status === "processing");
         setActiveSession((prev) => {
           if (!prev || prev.id !== activeSession.id) return prev;
@@ -866,18 +873,38 @@ export default function HomePage() {
         setSessions((prev) =>
           prev.map((s) => (s.id === activeSession.id ? { ...s, documents: docs } : s))
         );
-        if (!stillProcessing || attempts >= maxAttempts) {
-          clearInterval(interval);
-          if (stillProcessing && attempts >= maxAttempts) {
-            showToast("Document processing is taking longer than usual. You can check status or retry.", "info");
-          }
-        }
-      } catch (err) {
-        console.warn("Background document polling notice:", err);
-      }
-    }, 2000);
 
-    return () => clearInterval(interval);
+        if (!stillProcessing) {
+          return;
+        }
+
+        if (attempts >= maxAttempts) {
+          showToast("Document processing is taking longer than usual. You can check status or retry.", "info");
+          return;
+        }
+      } catch (err: unknown) {
+        consecutiveErrors++;
+        console.warn("Background document polling notice:", err);
+        // Exponential backoff if encountering errors/rate limits (up to 12s)
+        nextDelay = Math.min(12000, 3000 * Math.pow(1.5, consecutiveErrors));
+        if (consecutiveErrors >= 5) {
+          console.warn("Pausing background polling due to repeated errors.");
+          return;
+        }
+      }
+
+      if (!isCancelled) {
+        timerId = setTimeout(poll, nextDelay);
+      }
+    };
+
+    // Initial slight delay before first poll to allow server queue to settle
+    timerId = setTimeout(poll, 2000);
+
+    return () => {
+      isCancelled = true;
+      if (timerId) clearTimeout(timerId);
+    };
   }, [activeSession?.id, docStatusKey]);
 
   // ── Retry Document Processing ───────────────────────────────────────────────

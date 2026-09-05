@@ -102,6 +102,23 @@ async function fetchWithRetry(url: string, options?: RequestInit, retries = 2, d
       await new Promise((resolve) => setTimeout(resolve, delayMs));
       return fetchWithRetry(url, options, retries - 1, delayMs * 1.5);
     }
+    // If direct backend request is rate-limited (429) or fails with 502/503/504,
+    // immediately attempt fallback via Next.js server proxy (runs server-to-server)
+    if (
+      (res.status === 429 || res.status === 502 || res.status === 503 || res.status === 504) &&
+      API_BASE !== "/api/backend" &&
+      url.startsWith(API_BASE)
+    ) {
+      try {
+        const proxyUrl = url.replace(API_BASE, "/api/backend");
+        const proxyRes = await fetch(proxyUrl, finalOptions);
+        if (proxyRes.ok || proxyRes.status !== 429) {
+          return proxyRes;
+        }
+      } catch {
+        // preserve original response if proxy also errors
+      }
+    }
     return res;
   } catch (err) {
     if (retries > 0) {

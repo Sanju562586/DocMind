@@ -235,10 +235,35 @@ async def lifespan(app: FastAPI):
             store.close()
 
 
-limiter = Limiter(key_func=get_remote_address, default_limits=["120/minute"])
+def get_client_ip(request: Request) -> str:
+    """Extract real client IP behind reverse proxies (Cloudflare, Render, Vercel)."""
+    cf_ip = request.headers.get("cf-connecting-ip")
+    if cf_ip:
+        return cf_ip.strip()
+    x_forwarded_for = request.headers.get("x-forwarded-for")
+    if x_forwarded_for:
+        return x_forwarded_for.split(",")[0].strip()
+    if request.client and request.client.host:
+        return request.client.host
+    return "127.0.0.1"
+
+
+def _custom_rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded) -> Response:
+    """Build rate limit response ensuring CORS headers are always attached."""
+    response = _rate_limit_exceeded_handler(request, exc)
+    origin = request.headers.get("origin")
+    if origin:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Methods"] = "*"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+    return response
+
+
+limiter = Limiter(key_func=get_client_ip, default_limits=["300/minute"])
 app = FastAPI(title="DocMind Document Intelligence API", version="2.3.0", lifespan=lifespan)
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_exception_handler(RateLimitExceeded, _custom_rate_limit_exceeded_handler)
 
 cors_origins = settings.cors_origins if settings.cors_origins else ["http://localhost:3000", "http://127.0.0.1:3000"]
 app.add_middleware(
@@ -319,7 +344,7 @@ async def _enforce_rate_limit(request: Request, limit_str: str, resource_name: s
         elif "hour" in unit:
             window = 3600
 
-    client_ip = request.client.host if request.client else "127.0.0.1"
+    client_ip = get_client_ip(request)
     user_id = request.headers.get("X-User-Id") or client_ip
     key = f"{resource_name}:{user_id}"
 

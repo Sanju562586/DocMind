@@ -96,10 +96,19 @@ async function handleProxy(
     const isSSE = res.headers.get("content-type")?.includes("text/event-stream");
 
     const responseHeaders = new Headers();
+    // Headers that must not be forwarded because Node.js fetch decodes the response body,
+    // or because they are hop-by-hop transport headers.
+    const strippedHeaders = new Set([
+      "content-encoding",
+      "content-length",
+      "transfer-encoding",
+      "connection",
+      "keep-alive",
+    ]);
+
     res.headers.forEach((val, key) => {
       const lower = key.toLowerCase();
-      // Drop content-length and content-encoding on chunked/SSE streams to prevent browser chunk errors
-      if (isSSE && (lower === "content-length" || lower === "content-encoding")) {
+      if (strippedHeaders.has(lower)) {
         return;
       }
       responseHeaders.set(key, val);
