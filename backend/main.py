@@ -147,7 +147,12 @@ async def lifespan(app: FastAPI):
     os.makedirs(index_dir, exist_ok=True)
 
     logger.info("Initializing DocMind production backend components...")
-    store = SessionStore(db_path=db_path, database_url=settings.database_url)
+    store = SessionStore(
+        db_path=db_path,
+        database_url=settings.database_url,
+        upstash_url=settings.upstash_redis_rest_url,
+        upstash_token=settings.upstash_redis_rest_token,
+    )
     store.initialize()
 
     storage = get_storage_backend(settings)

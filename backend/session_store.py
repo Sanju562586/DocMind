@@ -18,6 +18,8 @@ import json
 import uuid
 import secrets
 import logging
+import urllib.request
+import urllib.error
 from datetime import datetime
 from typing import List, Dict, Optional, Any, Tuple
 from contextlib import contextmanager
@@ -71,9 +73,17 @@ class _DBConnectionWrapper:
 
 
 class SessionStore:
-    def __init__(self, db_path: str = "./data/summarizer.db", database_url: Optional[str] = None):
+    def __init__(
+        self,
+        db_path: str = "./data/summarizer.db",
+        database_url: Optional[str] = None,
+        upstash_url: Optional[str] = None,
+        upstash_token: Optional[str] = None,
+    ):
         self.db_path = db_path
         self.database_url = database_url
+        self.upstash_url = upstash_url.rstrip("/") if upstash_url else None
+        self.upstash_token = upstash_token
         self.is_postgres = False
         self._pg_pool = None
 
@@ -95,6 +105,9 @@ class SessionStore:
                     logger.error("Failed to connect to PostgreSQL: %s. Falling back to SQLite at %s", exc, self.db_path)
                     self.is_postgres = False
                     self._pg_pool = None
+
+        if self.is_cloud_sync_enabled:
+            logger.info("SessionStore: Upstash Redis cloud cross-device sync engine active [OK]")
 
     def initialize(self):
         """Create or migrate tables across PostgreSQL or SQLite."""
@@ -340,17 +353,281 @@ class SessionStore:
             return 0
         with self._conn() as conn:
             cur = conn.execute(
-                "UPDATE sessions SET user_id = ?, updated_at = datetime('now') WHERE user_id = 'default_user' OR user_id IS NULL",
+                "UPDATE sessions SET user_id = ? WHERE user_id = 'default_user' OR user_id IS NULL",
                 (target_user_id,),
             )
+            count = cur.rowcount if hasattr(cur, "rowcount") else 0
+            conn.execute(
+                "UPDATE global_memory SET user_id = ? WHERE user_id = 'default_user' OR user_id IS NULL",
+                (target_user_id,),
+            )
+        if self.is_cloud_sync_enabled:
             try:
-                conn.execute(
-                    "UPDATE global_memory SET user_id = ? WHERE user_id = 'default_user' OR user_id IS NULL",
-                    (target_user_id,),
-                )
-            except Exception:
-                pass
-            return cur.rowcount if hasattr(cur, "rowcount") else 0
+                with self._conn() as conn:
+                    rows = conn.execute("SELECT id, title, is_shared, share_token FROM sessions WHERE user_id = ?", (target_user_id,)).fetchall()
+                    for r in rows:
+                        self._cloud_save_session(r["id"], target_user_id, r["title"], r.get("is_shared", 0), r.get("share_token"))
+            except Exception as exc:
+                logger.debug("Cloud claim sync notice: %s", exc)
+        return count
+
+    @property
+    def is_cloud_sync_enabled(self) -> bool:
+        return bool(self.upstash_url and self.upstash_token)
+
+    def _upstash_cmd(self, command_path: str, body: Optional[Any] = None) -> Optional[Any]:
+        """Execute a REST command against Upstash Redis for cloud cross-device persistence."""
+        if not self.is_cloud_sync_enabled:
+            return None
+        url = f"{self.upstash_url}/{command_path}"
+        headers = {
+            "Authorization": f"Bearer {self.upstash_token}",
+            "Content-Type": "application/json",
+        }
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST" if data else "GET")
+        try:
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                raw = resp.read().decode("utf-8")
+                return json.loads(raw)
+        except Exception as exc:
+            logger.debug("Upstash cloud sync notice (%s): %s", command_path, exc)
+            return None
+
+    def _cloud_save_session(self, session_id: str, user_id: str, title: str, is_shared: int = 0, share_token: Optional[str] = None):
+        """Asynchronously sync session metadata to Upstash cloud store for cross-device access."""
+        if not self.is_cloud_sync_enabled:
+            return
+        try:
+            now_iso = datetime.utcnow().isoformat()
+            meta = {
+                "id": session_id,
+                "user_id": user_id or "default_user",
+                "title": title,
+                "is_shared": is_shared,
+                "share_token": share_token,
+                "updated_at": now_iso,
+            }
+            pipeline = [
+                ["SADD", f"docmind:user:{user_id or 'default_user'}:sessions", session_id],
+                ["SADD", "docmind:all_sessions", session_id],
+                ["SET", f"docmind:session:{session_id}:meta", json.dumps(meta)],
+            ]
+            self._upstash_cmd("pipeline", pipeline)
+        except Exception as exc:
+            logger.debug("Cloud session save notice: %s", exc)
+
+    def _cloud_save_message(self, session_id: str, msg_id: str, role: str, content: str, sources_json: Optional[str] = None, memory_json: Optional[str] = None):
+        """Sync chat message to Upstash cloud store for multi-device recall."""
+        if not self.is_cloud_sync_enabled:
+            return
+        try:
+            msg_obj = {
+                "id": msg_id,
+                "session_id": session_id,
+                "role": role,
+                "content": content,
+                "sources_json": sources_json,
+                "memory_json": memory_json,
+                "created_at": datetime.utcnow().isoformat(),
+            }
+            pipeline = [
+                ["RPUSH", f"docmind:session:{session_id}:messages", json.dumps(msg_obj)],
+                ["EXPIRE", f"docmind:session:{session_id}:messages", 86400 * 365],
+            ]
+            self._upstash_cmd("pipeline", pipeline)
+        except Exception as exc:
+            logger.debug("Cloud message save notice: %s", exc)
+
+    def _cloud_save_document(self, doc_id: str, session_id: str, filename: str, chunk_count: int = 0, char_count: int = 0, word_count: int = 0, file_type: str = "", file_path: str = "", status: str = "ready", error_message: Optional[str] = None):
+        """Sync document record to Upstash cloud store."""
+        if not self.is_cloud_sync_enabled:
+            return
+        try:
+            doc_obj = {
+                "id": doc_id,
+                "session_id": session_id,
+                "filename": filename,
+                "chunk_count": chunk_count,
+                "char_count": char_count,
+                "word_count": word_count,
+                "file_type": file_type,
+                "file_path": file_path,
+                "status": status,
+                "error_message": error_message,
+                "created_at": datetime.utcnow().isoformat(),
+            }
+            pipeline = [
+                ["SADD", f"docmind:session:{session_id}:docs", doc_id],
+                ["SET", f"docmind:doc:{doc_id}", json.dumps(doc_obj)],
+            ]
+            self._upstash_cmd("pipeline", pipeline)
+        except Exception as exc:
+            logger.debug("Cloud doc save notice: %s", exc)
+
+    def _cloud_delete_session(self, session_id: str, user_id: Optional[str] = None):
+        """Remove session and child records from Upstash cloud store."""
+        if not self.is_cloud_sync_enabled:
+            return
+        try:
+            u_id = user_id or "default_user"
+            pipeline = [
+                ["SREM", f"docmind:user:{u_id}:sessions", session_id],
+                ["SREM", "docmind:user:default_user:sessions", session_id],
+                ["SREM", "docmind:all_sessions", session_id],
+                ["DEL", f"docmind:session:{session_id}:meta"],
+                ["DEL", f"docmind:session:{session_id}:messages"],
+                ["DEL", f"docmind:session:{session_id}:docs"],
+            ]
+            self._upstash_cmd("pipeline", pipeline)
+        except Exception as exc:
+            logger.debug("Cloud session delete notice: %s", exc)
+
+    def sync_user_sessions_from_cloud(self, user_id: str) -> int:
+        """
+        Pull all sessions, documents, and messages for this user from Upstash Redis
+        into SQLite if they are missing (e.g. after a Render restart or when accessing
+        from a newly provisioned instance / device).
+        """
+        if not self.is_cloud_sync_enabled:
+            return 0
+
+        restored_count = 0
+        try:
+            user_keys = [f"docmind:user:{user_id}:sessions"]
+            if user_id != "default_user":
+                user_keys.append("docmind:user:default_user:sessions")
+
+            pipeline_req = [["SMEMBERS", k] for k in user_keys]
+            resp = self._upstash_cmd("pipeline", pipeline_req)
+            if not resp or not isinstance(resp, list):
+                return 0
+
+            session_ids = set()
+            for r in resp:
+                items = r.get("result", [])
+                if isinstance(items, list):
+                    for sid in items:
+                        if sid and isinstance(sid, str):
+                            session_ids.add(sid)
+
+            if not session_ids:
+                return 0
+
+            # Find missing sessions in local DB
+            with self._conn() as conn:
+                existing_rows = conn.execute(
+                    f"SELECT id FROM sessions WHERE id IN ({','.join(['?']*len(session_ids))})",
+                    tuple(session_ids),
+                ).fetchall()
+                existing_ids = {r["id"] for r in existing_rows}
+
+            missing_ids = list(session_ids - existing_ids)
+            if not missing_ids:
+                return 0
+
+            # Batch fetch missing session metas
+            meta_pipe = [["GET", f"docmind:session:{sid}:meta"] for sid in missing_ids]
+            meta_resp = self._upstash_cmd("pipeline", meta_pipe)
+            if not meta_resp or not isinstance(meta_resp, list):
+                return 0
+
+            for i, sid in enumerate(missing_ids):
+                if i >= len(meta_resp):
+                    break
+                meta_raw = meta_resp[i].get("result")
+                if not meta_raw:
+                    continue
+                try:
+                    meta = json.loads(meta_raw) if isinstance(meta_raw, str) else meta_raw
+                    if not meta or not meta.get("id"):
+                        continue
+
+                    # 1. Insert session
+                    with self._conn() as conn:
+                        conn.execute(
+                            """INSERT OR IGNORE INTO sessions (id, user_id, title, is_shared, share_token, updated_at, created_at)
+                               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                            (
+                                meta["id"],
+                                meta.get("user_id") or user_id,
+                                meta.get("title", "Conversation"),
+                                meta.get("is_shared", 0),
+                                meta.get("share_token"),
+                                meta.get("updated_at") or datetime.utcnow().isoformat(),
+                                meta.get("created_at") or meta.get("updated_at") or datetime.utcnow().isoformat(),
+                            ),
+                        )
+
+                    # 2. Fetch & insert messages for this session
+                    msgs_res = self._upstash_cmd(f"lrange/docmind:session:{sid}:messages/0/-1")
+                    if msgs_res and isinstance(msgs_res.get("result"), list):
+                        with self._conn() as conn:
+                            for m_raw in msgs_res["result"]:
+                                try:
+                                    m = json.loads(m_raw) if isinstance(m_raw, str) else m_raw
+                                    if m and m.get("id"):
+                                        conn.execute(
+                                            """INSERT OR IGNORE INTO messages (id, session_id, role, content, sources_json, memory_json, created_at)
+                                               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                                            (
+                                                m["id"],
+                                                sid,
+                                                m.get("role", "user"),
+                                                m.get("content", ""),
+                                                m.get("sources_json"),
+                                                m.get("memory_json"),
+                                                m.get("created_at") or datetime.utcnow().isoformat(),
+                                            ),
+                                        )
+                                except Exception:
+                                    pass
+
+                    # 3. Fetch & insert documents for this session
+                    doc_ids_res = self._upstash_cmd(f"smembers/docmind:session:{sid}:docs")
+                    if doc_ids_res and isinstance(doc_ids_res.get("result"), list):
+                        doc_ids = doc_ids_res["result"]
+                        if doc_ids:
+                            d_pipe = [["GET", f"docmind:doc:{did}"] for did in doc_ids]
+                            d_resp = self._upstash_cmd("pipeline", d_pipe)
+                            if d_resp and isinstance(d_resp, list):
+                                with self._conn() as conn:
+                                    for dr in d_resp:
+                                        d_raw = dr.get("result")
+                                        if d_raw:
+                                            try:
+                                                d = json.loads(d_raw) if isinstance(d_raw, str) else d_raw
+                                                if d and d.get("id"):
+                                                    conn.execute(
+                                                        """INSERT OR IGNORE INTO documents (id, session_id, filename, chunk_count, char_count, word_count, file_type, file_path, status, error_message, created_at)
+                                                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                                        (
+                                                            d["id"],
+                                                            sid,
+                                                            d.get("filename", "document"),
+                                                            d.get("chunk_count", 0),
+                                                            d.get("char_count", 0),
+                                                            d.get("word_count", 0),
+                                                            d.get("file_type", ""),
+                                                            d.get("file_path", ""),
+                                                            d.get("status", "ready"),
+                                                            d.get("error_message"),
+                                                            d.get("created_at") or datetime.utcnow().isoformat(),
+                                                        ),
+                                                    )
+                                            except Exception:
+                                                pass
+
+                    restored_count += 1
+                except Exception as exc:
+                    logger.debug("Restore error for session %s: %s", sid, exc)
+
+            if restored_count > 0:
+                logger.info("Cloud Sync: Restored %d sessions from Upstash for user %s [OK]", restored_count, user_id)
+        except Exception as exc:
+            logger.debug("Cloud sync error: %s", exc)
+
+        return restored_count
 
     # ──────────────────────────────────────────────
     # Users (Google, GitHub, Credentials)
@@ -391,22 +668,26 @@ class SessionStore:
 
     def create_session(self, title: str = "New Conversation", user_id: str = "default_user") -> str:
         session_id = str(uuid.uuid4())
+        u_id = user_id or "default_user"
         with self._conn() as conn:
             conn.execute(
                 "INSERT INTO sessions (id, user_id, title) VALUES (?, ?, ?)",
-                (session_id, user_id or "default_user", title),
+                (session_id, u_id, title),
             )
+        self._cloud_save_session(session_id=session_id, user_id=u_id, title=title)
         return session_id
 
     def ensure_session(self, session_id: str, title: str = "New Conversation", user_id: str = "default_user") -> None:
         """Create session if it does not exist already (idempotent recovery after restarts)."""
+        u_id = user_id or "default_user"
         with self._conn() as conn:
             existing = conn.execute("SELECT id FROM sessions WHERE id = ?", (session_id,)).fetchone()
             if not existing:
                 conn.execute(
                     "INSERT INTO sessions (id, user_id, title) VALUES (?, ?, ?)",
-                    (session_id, user_id or "default_user", title),
+                    (session_id, u_id, title),
                 )
+        self._cloud_save_session(session_id=session_id, user_id=u_id, title=title)
 
     def get_session(self, session_id: str, user_id: Optional[str] = None) -> Optional[Dict]:
         try:
@@ -428,6 +709,17 @@ class SessionStore:
                 ).fetchone()
 
             if not row:
+                # If session is missing in SQLite, attempt cloud sync for user
+                if user_id and self.is_cloud_sync_enabled:
+                    self.sync_user_sessions_from_cloud(user_id)
+                    with self._conn() as conn_retry:
+                        clause, p = self._user_filter(user_id, "user_id")
+                        row = conn_retry.execute(
+                            f"SELECT * FROM sessions WHERE id = ? AND {clause}",
+                            (session_id, *p),
+                        ).fetchone()
+
+            if not row:
                 return None
             session = dict(row)
             doc_rows = conn.execute(
@@ -444,6 +736,13 @@ class SessionStore:
         return session
 
     def list_sessions(self, user_id: Optional[str] = None) -> List[Dict]:
+        # Sync missing user sessions from cloud store
+        if user_id and self.is_cloud_sync_enabled:
+            try:
+                self.sync_user_sessions_from_cloud(user_id)
+            except Exception as exc:
+                logger.debug("Cloud sync notice in list_sessions: %s", exc)
+
         with self._conn() as conn:
             if user_id:
                 clause, p = self._user_filter(user_id, "s.user_id")
@@ -488,6 +787,7 @@ class SessionStore:
                     "UPDATE sessions SET title = ?, updated_at = datetime('now') WHERE id = ?",
                     (title, session_id),
                 )
+        self._cloud_save_session(session_id=session_id, user_id=user_id or "default_user", title=title)
 
     def delete_session(self, session_id: str, user_id: Optional[str] = None):
         with self._conn() as conn:
@@ -496,6 +796,7 @@ class SessionStore:
                 conn.execute(f"DELETE FROM sessions WHERE id = ? AND {clause}", (session_id, *p))
             else:
                 conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+        self._cloud_delete_session(session_id=session_id, user_id=user_id)
 
     def touch_session(self, session_id: str):
         with self._conn() as conn:
@@ -650,6 +951,18 @@ class SessionStore:
                 (doc_id, session_id, filename, chunk_count, char_count, word_count, file_type, file_path, status, error_message),
             )
         self.touch_session(session_id)
+        self._cloud_save_document(
+            doc_id=doc_id,
+            session_id=session_id,
+            filename=filename,
+            chunk_count=chunk_count,
+            char_count=char_count,
+            word_count=word_count,
+            file_type=file_type,
+            file_path=file_path,
+            status=status,
+            error_message=error_message,
+        )
 
     def update_document_processed(
         self,
@@ -667,6 +980,21 @@ class SessionStore:
                    WHERE id = ?""",
                 (chunk_count, char_count, word_count, status, error_message, doc_id),
             )
+            doc = conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
+            if doc:
+                d = dict(doc)
+                self._cloud_save_document(
+                    doc_id=doc_id,
+                    session_id=d["session_id"],
+                    filename=d["filename"],
+                    chunk_count=chunk_count,
+                    char_count=char_count,
+                    word_count=word_count,
+                    file_type=d.get("file_type", ""),
+                    file_path=d.get("file_path", ""),
+                    status=status,
+                    error_message=error_message,
+                )
 
     def update_document_status(
         self,
@@ -681,6 +1009,21 @@ class SessionStore:
                    WHERE id = ?""",
                 (status, error_message, doc_id),
             )
+            doc = conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
+            if doc:
+                d = dict(doc)
+                self._cloud_save_document(
+                    doc_id=doc_id,
+                    session_id=d["session_id"],
+                    filename=d["filename"],
+                    chunk_count=d.get("chunk_count", 0),
+                    char_count=d.get("char_count", 0),
+                    word_count=d.get("word_count", 0),
+                    file_type=d.get("file_type", ""),
+                    file_path=d.get("file_path", ""),
+                    status=status,
+                    error_message=error_message,
+                )
 
     def get_stuck_documents(self) -> List[Dict[str, Any]]:
         """Return all documents currently in 'processing' state."""
@@ -751,6 +1094,15 @@ class SessionStore:
             session_id = doc["session_id"]
             conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
         self.touch_session(session_id)
+        if self.is_cloud_sync_enabled:
+            try:
+                pipeline = [
+                    ["SREM", f"docmind:session:{session_id}:docs", doc_id],
+                    ["DEL", f"docmind:doc:{doc_id}"],
+                ]
+                self._upstash_cmd("pipeline", pipeline)
+            except Exception as exc:
+                logger.debug("Cloud doc delete notice: %s", exc)
         return session_id
 
     # ──────────────────────────────────────────────
@@ -775,6 +1127,14 @@ class SessionStore:
                 (msg_id, session_id, role, content, sources_json, memory_json),
             )
         self.touch_session(session_id)
+        self._cloud_save_message(
+            session_id=session_id,
+            msg_id=msg_id,
+            role=role,
+            content=content,
+            sources_json=sources_json,
+            memory_json=memory_json,
+        )
         return msg_id
 
     def get_messages(self, session_id: str) -> List[Dict]:
@@ -783,6 +1143,37 @@ class SessionStore:
                 "SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC",
                 (session_id,),
             ).fetchall()
+
+        # If no messages found locally in SQLite and cloud sync is enabled, rehydrate from Upstash
+        if not rows and self.is_cloud_sync_enabled:
+            msgs_res = self._upstash_cmd(f"lrange/docmind:session:{session_id}:messages/0/-1")
+            if msgs_res and isinstance(msgs_res.get("result"), list) and msgs_res["result"]:
+                with self._conn() as conn:
+                    for m_raw in msgs_res["result"]:
+                        try:
+                            m = json.loads(m_raw) if isinstance(m_raw, str) else m_raw
+                            if m and m.get("id"):
+                                conn.execute(
+                                    """INSERT OR IGNORE INTO messages (id, session_id, role, content, sources_json, memory_json, created_at)
+                                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                                    (
+                                        m["id"],
+                                        session_id,
+                                        m.get("role", "user"),
+                                        m.get("content", ""),
+                                        m.get("sources_json"),
+                                        m.get("memory_json"),
+                                        m.get("created_at") or datetime.utcnow().isoformat(),
+                                    ),
+                                )
+                        except Exception:
+                            pass
+                with self._conn() as conn:
+                    rows = conn.execute(
+                        "SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC",
+                        (session_id,),
+                    ).fetchall()
+
         results = []
         for r in rows:
             m = dict(r)

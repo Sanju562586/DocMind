@@ -9,12 +9,27 @@ const API_BASE = process.env.NEXT_PUBLIC_DIRECT_API === "true" && process.env.NE
 function getUserHeaders(): Record<string, string> {
   if (typeof document === "undefined") return {};
   try {
+    // 1. Try cookie first
     const value = `; ${document.cookie}`;
     const parts = value.split(`; docmind_user=`);
     if (parts.length === 2) {
       const val = parts.pop()?.split(";").shift();
       if (val) {
         const user = JSON.parse(decodeURIComponent(val));
+        if (user && user.id) {
+          return {
+            "X-User-Id": user.id,
+            "X-User-Email": user.email || "guest@docmind.local",
+            "X-User-Name": user.name || "Guest User",
+          };
+        }
+      }
+    }
+    // 2. Fallback to localStorage (especially for mobile browsers or when cookies are partitioned)
+    if (typeof localStorage !== "undefined") {
+      const ls = localStorage.getItem("docmind_user");
+      if (ls) {
+        const user = JSON.parse(ls);
         if (user && user.id) {
           return {
             "X-User-Id": user.id,

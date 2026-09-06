@@ -452,6 +452,25 @@ export function AuthModal() {
             </form>
           )}
 
+          {/* Cross-Device Sync Info Banner */}
+          <div
+            style={{
+              marginBottom: 14,
+              padding: "10px 12px",
+              borderRadius: 8,
+              background: "rgba(96, 165, 250, 0.08)",
+              border: "1px solid rgba(96, 165, 250, 0.2)",
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+            }}
+          >
+            <Sparkles size={16} color="#60a5fa" style={{ flexShrink: 0 }} />
+            <div style={{ fontSize: 11, color: "rgba(255, 255, 255, 0.8)", lineHeight: 1.4 }}>
+              <strong style={{ color: "#60a5fa" }}>Multi-Device Cloud Sync:</strong> Sign in with the same email or profile across your phone, tablet, or laptop to instantly access all your conversations and documents.
+            </div>
+          </div>
+
           {/* Footer Security Note */}
           <div
             style={{
@@ -460,13 +479,19 @@ export function AuthModal() {
               borderTop: "1px solid rgba(255, 255, 255, 0.08)",
               display: "flex",
               alignItems: "center",
-              gap: 6,
+              justifyContent: "space-between",
               fontSize: 11,
               color: "rgba(255, 255, 255, 0.45)",
             }}
           >
-            <Lock size={12} color="#10b981" />
-            Sessions, document vectors &amp; memory are cryptographically isolated per user ID.
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <Lock size={12} color="#10b981" />
+              Private user-isolated encryption
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 4, color: "#60a5fa" }}>
+              <Globe size={11} />
+              Cross-device sync active
+            </div>
           </div>
         </motion.div>
       </motion.div>

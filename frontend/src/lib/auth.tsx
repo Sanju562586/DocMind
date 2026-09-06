@@ -80,23 +80,65 @@ function getCookie(name: string): string | null {
   return null;
 }
 
+function saveUserStorage(user: User) {
+  if (typeof window === "undefined") return;
+  const userJson = JSON.stringify(user);
+  setCookie("docmind_user", userJson);
+  try {
+    localStorage.setItem("docmind_user", userJson);
+  } catch {
+    // ignore localStorage exceptions
+  }
+}
+
+function clearUserStorage() {
+  if (typeof window === "undefined") return;
+  deleteCookie("docmind_user");
+  deleteCookie("docmind_session");
+  try {
+    localStorage.removeItem("docmind_user");
+    localStorage.removeItem("docmind_session");
+  } catch {
+    // ignore
+  }
+}
+
+function loadSavedUser(): User | null {
+  if (typeof window === "undefined") return null;
+  // 1. Try cookie
+  try {
+    const savedCookie = getCookie("docmind_user");
+    if (savedCookie) {
+      const parsed = JSON.parse(savedCookie);
+      if (parsed && parsed.id) return parsed;
+    }
+  } catch {
+    // ignore
+  }
+  // 2. Try localStorage fallback
+  try {
+    const ls = localStorage.getItem("docmind_user");
+    if (ls) {
+      const parsed = JSON.parse(ls);
+      if (parsed && parsed.id) return parsed;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
 
-  // Initialize user from cookie or default demo profile
+  // Initialize user from cookie or localStorage or default demo profile
   useEffect(() => {
-    try {
-      const savedUserStr = getCookie("docmind_user");
-      if (savedUserStr) {
-        const parsed = JSON.parse(savedUserStr);
-        if (parsed && parsed.id) {
-          setUser(parsed);
-          return;
-        }
-      }
-    } catch {
-      // ignore
+    const saved = loadSavedUser();
+    if (saved) {
+      setUser(saved);
+      saveUserStorage(saved);
+      return;
     }
 
     // Default to Alex Rivera demo account for immediate interactive experience
@@ -110,7 +152,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       isDemo: true,
     };
     setUser(defaultUser);
-    setCookie("docmind_user", JSON.stringify(defaultUser));
+    saveUserStorage(defaultUser);
   }, []);
 
   const loginDemo = useCallback((profileKey: string) => {
@@ -124,7 +166,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       isDemo: true,
     };
     setUser(demoUser);
-    setCookie("docmind_user", JSON.stringify(demoUser));
+    saveUserStorage(demoUser);
     setIsAuthModalOpen(false);
   }, []);
 
@@ -140,7 +182,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       isDemo: false,
     };
     setUser(newUser);
-    setCookie("docmind_user", JSON.stringify(newUser));
+    saveUserStorage(newUser);
     setIsAuthModalOpen(false);
   }, []);
 
@@ -157,8 +199,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch {
       // ignore
     }
-    deleteCookie("docmind_user");
-    deleteCookie("docmind_session");
+    clearUserStorage();
     // Switch to anonymous guest
     const guestUser: User = {
       id: `guest_${Date.now().toString(36)}`,
@@ -170,7 +211,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       isDemo: true,
     };
     setUser(guestUser);
-    setCookie("docmind_user", JSON.stringify(guestUser));
+    saveUserStorage(guestUser);
   }, []);
 
   const openAuthModal = useCallback(() => setIsAuthModalOpen(true), []);
