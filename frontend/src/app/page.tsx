@@ -62,6 +62,7 @@ import {
   deleteMemoryItem,
   clearAllMemories,
   saveSecureKeys,
+  fetchKeyStatus,
   QuizQuestion,
 } from "@/lib/api";
 import { exportSessionToPdf } from "@/lib/pdfExporter";
@@ -396,12 +397,21 @@ export default function HomePage() {
     return () => clearInterval(interval);
   }, [backendStatus]);
 
-  // ── Sync user-isolated sessions when identity changes ──────────────────────
+  // ── Sync user-isolated sessions & API keys when identity changes ──────────
   useEffect(() => {
     if (user?.id) {
-      loadSessionsList();
-      setActiveSession(null);
-      setMessages([]);
+      loadSessionsList(true);
+      fetchKeyStatus()
+        .then((status) => {
+          if (status.keys) {
+            setApiKeys({
+              gemini: status.keys.gemini || "",
+              groq: status.keys.groq || "",
+              openrouter: status.keys.openrouter || "",
+            });
+          }
+        })
+        .catch(() => {});
     }
   }, [user?.id]);
 
@@ -417,17 +427,28 @@ export default function HomePage() {
     try {
       await checkBackendHealth();
       setBackendStatus("healthy");
-      loadSessionsList();
+      loadSessionsList(true);
     } catch {
       setBackendStatus("unreachable");
     }
   };
 
-  const loadSessionsList = async () => {
+  const loadSessionsList = async (autoRestoreLast = false) => {
     try {
       const sessList = await listSessions();
       setSessions(sessList);
       setBackendStatus("healthy");
+      if (autoRestoreLast && user?.id && typeof window !== "undefined") {
+        try {
+          const lastId = localStorage.getItem(`docmind_last_session_${user.id}`);
+          if (lastId) {
+            const target = sessList.find((s) => s.id === lastId);
+            if (target) {
+              handleSelectSession(target);
+            }
+          }
+        } catch {}
+      }
     } catch (err) {
       console.warn("Backend server not reachable during session loading:", err);
       setBackendStatus("unreachable");
@@ -472,6 +493,11 @@ export default function HomePage() {
   // ── Select a session ────────────────────────────────────────────────────────
   const handleSelectSession = useCallback(async (session: Session) => {
     setActiveSession(session);
+    if (user?.id && typeof window !== "undefined") {
+      try {
+        localStorage.setItem(`docmind_last_session_${user.id}`, session.id);
+      } catch {}
+    }
     setIsLoadingMessages(true);
     setMessages([]);
     setError("");
@@ -489,12 +515,17 @@ export default function HomePage() {
     } finally {
       setIsLoadingMessages(false);
     }
-  }, []);
+  }, [user?.id]);
 
   // ── Start a new chat ────────────────────────────────────────────────────────
   const handleNewChat = async () => {
     try {
       const newId = await createSession("New Conversation");
+      if (user?.id && typeof window !== "undefined") {
+        try {
+          localStorage.setItem(`docmind_last_session_${user.id}`, newId);
+        } catch {}
+      }
       const updatedList = await listSessions();
       setSessions(updatedList);
       const created = updatedList.find((s) => s.id === newId) || {
@@ -1088,6 +1119,14 @@ export default function HomePage() {
             if (activeSession?.id === id) {
               setActiveSession(null);
               setMessages([]);
+            }
+            if (user?.id && typeof window !== "undefined") {
+              try {
+                const lastId = localStorage.getItem(`docmind_last_session_${user.id}`);
+                if (lastId === id) {
+                  localStorage.removeItem(`docmind_last_session_${user.id}`);
+                }
+              } catch {}
             }
           }}
           onSessionRenamed={(id, newTitle) => {

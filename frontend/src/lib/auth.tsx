@@ -58,7 +58,7 @@ function emailToUserId(email: string): string {
   return `user_${clean}`;
 }
 
-function setCookie(name: string, value: string, days = 30) {
+function setCookie(name: string, value: string, days = 365) {
   if (typeof document === "undefined") return;
   const expires = new Date(Date.now() + days * 864e5).toUTCString();
   document.cookie = `${name}=${encodeURIComponent(value)}; expires=${expires}; path=/; SameSite=Lax`;
@@ -83,7 +83,7 @@ function getCookie(name: string): string | null {
 function saveUserStorage(user: User) {
   if (typeof window === "undefined") return;
   const userJson = JSON.stringify(user);
-  setCookie("docmind_user", userJson);
+  setCookie("docmind_user", userJson, 365);
   try {
     localStorage.setItem("docmind_user", userJson);
   } catch {
@@ -167,6 +167,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
     setUser(demoUser);
     saveUserStorage(demoUser);
+    // Mint session JWT cookie on server
+    try {
+      fetch("/api/auth/signin", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: demoUser.email,
+          name: demoUser.name,
+          image: demoUser.image,
+          provider: "credentials",
+        }),
+      }).catch(() => {});
+    } catch {}
     setIsAuthModalOpen(false);
   }, []);
 
@@ -183,6 +196,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
     setUser(newUser);
     saveUserStorage(newUser);
+    // Mint session JWT cookie on server
+    try {
+      fetch("/api/auth/signin", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: newUser.email,
+          name: newUser.name,
+          image: newUser.image,
+          provider: "credentials",
+        }),
+      }).catch(() => {});
+    } catch {}
     setIsAuthModalOpen(false);
   }, []);
 

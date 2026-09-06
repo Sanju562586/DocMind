@@ -11,11 +11,13 @@ export interface User {
 }
 
 export interface KeyStatus {
+  user_id?: string;
   gemini_configured: boolean;
   groq_configured: boolean;
   openrouter_configured: boolean;
   has_custom_keys: boolean;
   has_server_keys: boolean;
+  keys?: ApiKeys;
 }
 
 export interface Document {

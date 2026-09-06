@@ -27,7 +27,7 @@ export interface UserPayload {
   [key: string]: any;
 }
 
-export function signJwt(payload: UserPayload, secret: string = JWT_SECRET, expiresInMinutes = 43200): string {
+export function signJwt(payload: UserPayload, secret: string = JWT_SECRET, expiresInMinutes = 525600): string {
   const header = { alg: "HS256", typ: "JWT" };
   const now = Math.floor(Date.now() / 1000);
   const fullPayload = {

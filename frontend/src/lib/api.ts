@@ -183,7 +183,10 @@ async function handleResponse<T>(res: Response, fallbackError: string): Promise<
 
 export async function fetchKeyStatus(): Promise<KeyStatus> {
   try {
-    const res = await fetch("/api/keys", { cache: "no-store" });
+    const res = await fetch("/api/keys", {
+      cache: "no-store",
+      headers: { ...getUserHeaders() },
+    });
     if (!res.ok) {
       return {
         gemini_configured: false,
@@ -209,7 +212,10 @@ export async function saveSecureKeys(keys: Partial<ApiKeys>): Promise<void> {
   try {
     const res = await fetch("/api/keys", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...getUserHeaders(),
+      },
       body: JSON.stringify(keys),
     });
     if (!res.ok) {
@@ -223,7 +229,10 @@ export async function saveSecureKeys(keys: Partial<ApiKeys>): Promise<void> {
 
 export async function clearSecureKeys(): Promise<void> {
   try {
-    await fetch("/api/keys", { method: "DELETE" });
+    await fetch("/api/keys", {
+      method: "DELETE",
+      headers: { ...getUserHeaders() },
+    });
   } catch {
     // ignore
   }

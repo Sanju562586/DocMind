@@ -133,13 +133,13 @@ export async function GET(
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       sameSite: "lax",
-      maxAge: 30 * 86400,
+      maxAge: 365 * 86400,
     });
     res.cookies.set("docmind_user", JSON.stringify(user), {
       path: "/",
       httpOnly: false,
       sameSite: "lax",
-      maxAge: 30 * 86400,
+      maxAge: 365 * 86400,
     });
     return res;
   }
@@ -182,13 +182,13 @@ export async function GET(
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       sameSite: "lax",
-      maxAge: 30 * 86400,
+      maxAge: 365 * 86400,
     });
     res.cookies.set("docmind_user", JSON.stringify(user), {
       path: "/",
       httpOnly: false,
       sameSite: "lax",
-      maxAge: 30 * 86400,
+      maxAge: 365 * 86400,
     });
     return res;
   }
@@ -246,13 +246,13 @@ export async function GET(
               httpOnly: true,
               secure: process.env.NODE_ENV === "production",
               sameSite: "lax",
-              maxAge: 30 * 86400,
+              maxAge: 365 * 86400,
             });
             res.cookies.set("docmind_user", JSON.stringify(user), {
               path: "/",
               httpOnly: false,
               sameSite: "lax",
-              maxAge: 30 * 86400,
+              maxAge: 365 * 86400,
             });
             return res;
           }
@@ -337,13 +337,13 @@ export async function GET(
                 httpOnly: true,
                 secure: process.env.NODE_ENV === "production",
                 sameSite: "lax",
-                maxAge: 30 * 86400,
+                maxAge: 365 * 86400,
               });
               res.cookies.set("docmind_user", JSON.stringify(user), {
                 path: "/",
                 httpOnly: false,
                 sameSite: "lax",
-                maxAge: 30 * 86400,
+                maxAge: 365 * 86400,
               });
               return res;
             }
@@ -402,7 +402,7 @@ export async function POST(
         httpOnly: true,
         secure: process.env.NODE_ENV === "production",
         sameSite: "lax",
-        maxAge: 30 * 86400,
+        maxAge: 365 * 86400,
       });
 
       // Set client profile cookie
@@ -410,7 +410,7 @@ export async function POST(
         path: "/",
         httpOnly: false,
         sameSite: "lax",
-        maxAge: 30 * 86400,
+        maxAge: 365 * 86400,
       });
 
       return res;

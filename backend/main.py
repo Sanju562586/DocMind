@@ -350,18 +350,106 @@ def _get_user_info(request: Request) -> Dict[str, str]:
 
 
 def _api_keys(request: Request) -> dict:
-    """Extract API keys prioritizing request headers then server environment variables."""
+    """Extract API keys prioritizing request headers, then persistent user keys from DB, then server environment variables."""
     def _clean(val: Optional[str]) -> Optional[str]:
         if val is None:
             return None
-        v = val.strip()
+        v = str(val).strip()
         return v if v else None
 
+    header_gemini = _clean(request.headers.get("X-Gemini-Key"))
+    header_groq = _clean(request.headers.get("X-Groq-Key"))
+    header_openrouter = _clean(request.headers.get("X-OpenRouter-Key"))
+
+    # Fallback to persistent user keys stored in DB if headers lack keys
+    user_keys = {}
+    if not (header_gemini and header_groq and header_openrouter) and store:
+        try:
+            user = _get_user_info(request)
+            u_id = user.get("user_id")
+            if u_id:
+                user_keys = store.get_user_keys(u_id)
+        except Exception as exc:
+            logger.debug("User key lookup fallback notice: %s", exc)
+
     return {
-        "gemini": _clean(request.headers.get("X-Gemini-Key")) or _clean(settings.gemini_api_key),
-        "groq": _clean(request.headers.get("X-Groq-Key")) or _clean(settings.groq_api_key),
-        "openrouter": _clean(request.headers.get("X-OpenRouter-Key")) or _clean(settings.openrouter_api_key),
+        "gemini": header_gemini or _clean(user_keys.get("gemini")) or _clean(settings.gemini_api_key),
+        "groq": header_groq or _clean(user_keys.get("groq")) or _clean(settings.groq_api_key),
+        "openrouter": header_openrouter or _clean(user_keys.get("openrouter")) or _clean(settings.openrouter_api_key),
     }
+
+
+# ──────────────────────────────────────────────
+# User-Scoped Multi-LLM API Keys Management
+# ──────────────────────────────────────────────
+
+@app.get("/api/user/keys")
+async def get_user_keys_endpoint(request: Request):
+    """Retrieve configured API keys for the authenticated user."""
+    user = _get_user_info(request)
+    u_id = user.get("user_id", "default_user")
+    keys = store.get_user_keys(u_id) if store else {}
+
+    server_gemini = bool(settings.gemini_api_key)
+    server_groq = bool(settings.groq_api_key)
+    server_openrouter = bool(settings.openrouter_api_key)
+
+    has_gemini = bool(keys.get("gemini") or server_gemini)
+    has_groq = bool(keys.get("groq") or server_groq)
+    has_openrouter = bool(keys.get("openrouter") or server_openrouter)
+
+    return {
+        "user_id": u_id,
+        "gemini_configured": has_gemini,
+        "groq_configured": has_groq,
+        "openrouter_configured": has_openrouter,
+        "has_custom_keys": bool(keys.get("gemini") or keys.get("groq") or keys.get("openrouter")),
+        "has_server_keys": bool(server_gemini or server_groq or server_openrouter),
+        "keys": {
+            "gemini": keys.get("gemini", ""),
+            "groq": keys.get("groq", ""),
+            "openrouter": keys.get("openrouter", ""),
+        },
+    }
+
+
+@app.post("/api/user/keys")
+async def save_user_keys_endpoint(request: Request):
+    """Persist custom multi-LLM API keys for the authenticated user."""
+    user = _get_user_info(request)
+    u_id = user.get("user_id", "default_user")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    keys_to_save = {
+        "gemini": str(body.get("gemini", "")).strip(),
+        "groq": str(body.get("groq", "")).strip(),
+        "openrouter": str(body.get("openrouter", "")).strip(),
+    }
+
+    if store:
+        store.save_user_keys(u_id, keys_to_save)
+
+    return {
+        "status": "saved",
+        "user_id": u_id,
+        "message": "API keys successfully saved and persisted for user profile.",
+        "gemini_configured": bool(keys_to_save["gemini"] or settings.gemini_api_key),
+        "groq_configured": bool(keys_to_save["groq"] or settings.groq_api_key),
+        "openrouter_configured": bool(keys_to_save["openrouter"] or settings.openrouter_api_key),
+    }
+
+
+@app.delete("/api/user/keys")
+async def clear_user_keys_endpoint(request: Request):
+    """Clear custom API keys for the authenticated user."""
+    user = _get_user_info(request)
+    u_id = user.get("user_id", "default_user")
+    if store:
+        store.clear_user_keys(u_id)
+    return {"status": "cleared", "user_id": u_id, "message": "Custom keys cleared for user."}
 
 
 async def _enforce_rate_limit(request: Request, limit_str: str, resource_name: str = "api"):

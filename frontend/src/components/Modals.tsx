@@ -29,10 +29,18 @@ export function ApiKeyModal({ apiKeys, onSave, onClose }: ApiKeyModalProps) {
   const [message, setMessage] = useState("");
 
   useEffect(() => {
-    if (apiKeys) {
-      setKeys(apiKeys);
-    }
-    fetchKeyStatus().then((s) => setStatus(s));
+    fetchKeyStatus().then((s) => {
+      setStatus(s);
+      if (s.keys) {
+        setKeys((prev) => ({
+          gemini: s.keys?.gemini || apiKeys?.gemini || prev.gemini || "",
+          groq: s.keys?.groq || apiKeys?.groq || prev.groq || "",
+          openrouter: s.keys?.openrouter || apiKeys?.openrouter || prev.openrouter || "",
+        }));
+      } else if (apiKeys) {
+        setKeys(apiKeys);
+      }
+    });
   }, [apiKeys]);
 
   const handleSave = async () => {

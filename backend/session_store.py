@@ -126,6 +126,7 @@ class SessionStore:
                     name TEXT,
                     image TEXT,
                     provider TEXT DEFAULT 'credentials',
+                    api_keys_json TEXT,
                     created_at TEXT DEFAULT (datetime('now')),
                     last_login_at TEXT DEFAULT (datetime('now'))
                 );
@@ -181,6 +182,7 @@ class SessionStore:
 
             # Safe migrations for existing SQLite databases
             for col_sql in [
+                "ALTER TABLE users ADD COLUMN api_keys_json TEXT",
                 "ALTER TABLE documents ADD COLUMN status TEXT DEFAULT 'ready'",
                 "ALTER TABLE documents ADD COLUMN error_message TEXT",
                 "ALTER TABLE sessions ADD COLUMN user_id TEXT DEFAULT 'default_user'",
@@ -215,6 +217,7 @@ class SessionStore:
                     name VARCHAR(255),
                     image VARCHAR(512),
                     provider VARCHAR(64) DEFAULT 'credentials',
+                    api_keys_json TEXT,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
                     last_login_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 );
@@ -275,6 +278,7 @@ class SessionStore:
 
             # Safe migrations for existing PostgreSQL databases
             for col_sql in [
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS api_keys_json TEXT",
                 "ALTER TABLE documents ADD COLUMN IF NOT EXISTS status VARCHAR(64) DEFAULT 'ready'",
                 "ALTER TABLE documents ADD COLUMN IF NOT EXISTS error_message TEXT",
                 "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_id VARCHAR(128) DEFAULT 'default_user'",
@@ -661,6 +665,66 @@ class SessionStore:
         with self._conn() as conn:
             row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
             return dict(row) if row else None
+
+    def save_user_keys(self, user_id: str, keys: Dict[str, str]) -> None:
+        """Persist encrypted/serialized API keys for a specific user profile."""
+        clean_keys = {k: v.strip() for k, v in keys.items() if isinstance(v, str) and v.strip()}
+        keys_json = json.dumps(clean_keys) if clean_keys else None
+        with self._conn() as conn:
+            # Ensure user exists first
+            conn.execute(
+                """INSERT INTO users (id, email, name, last_login_at)
+                   VALUES (?, ?, ?, datetime('now'))
+                   ON CONFLICT(id) DO NOTHING""",
+                (user_id, f"{user_id}@docmind.local", user_id),
+            )
+            conn.execute(
+                "UPDATE users SET api_keys_json = ?, last_login_at = datetime('now') WHERE id = ?",
+                (keys_json, user_id),
+            )
+        if self.is_cloud_sync_enabled and keys_json:
+            try:
+                self._upstash_cmd("set", f"docmind:user:{user_id}:keys", keys_json)
+            except Exception as exc:
+                logger.debug("Cloud user key sync notice: %s", exc)
+
+    def get_user_keys(self, user_id: str) -> Dict[str, str]:
+        """Retrieve stored API keys for a user profile, with cloud sync fallback."""
+        if not user_id:
+            return {}
+        with self._conn() as conn:
+            row = conn.execute("SELECT api_keys_json FROM users WHERE id = ?", (user_id,)).fetchone()
+            if row and row["api_keys_json"]:
+                try:
+                    return json.loads(row["api_keys_json"])
+                except Exception:
+                    pass
+
+        # Cloud sync fallback
+        if self.is_cloud_sync_enabled:
+            try:
+                res = self._upstash_cmd(f"get/docmind:user:{user_id}:keys")
+                raw = res.get("result") if res else None
+                if raw:
+                    keys = json.loads(raw) if isinstance(raw, str) else raw
+                    if isinstance(keys, dict):
+                        # Cache into local database
+                        self.save_user_keys(user_id, keys)
+                        return keys
+            except Exception as exc:
+                logger.debug("Cloud user key lookup notice: %s", exc)
+
+        return {}
+
+    def clear_user_keys(self, user_id: str) -> None:
+        """Clear custom stored API keys for a user."""
+        with self._conn() as conn:
+            conn.execute("UPDATE users SET api_keys_json = NULL WHERE id = ?", (user_id,))
+        if self.is_cloud_sync_enabled:
+            try:
+                self._upstash_cmd("del", f"docmind:user:{user_id}:keys")
+            except Exception:
+                pass
 
     # ──────────────────────────────────────────────
     # Sessions

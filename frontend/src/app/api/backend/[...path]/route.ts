@@ -56,18 +56,24 @@ async function handleProxy(
     headers.set("Authorization", `Bearer ${sessionToken}`);
   }
 
+  let userId = "";
   const userCookie = req.cookies.get("docmind_user")?.value;
   if (userCookie) {
     const user = safeParseJson(userCookie);
-    if (user?.id) headers.set("X-User-Id", user.id);
+    if (user?.id) {
+      userId = user.id;
+      headers.set("X-User-Id", user.id);
+    }
     if (user?.email) headers.set("X-User-Email", user.email);
     if (user?.name) headers.set("X-User-Name", user.name);
   }
 
-  // 2. Inject Secure HTTP-only API Keys server-to-server
-  const keysCookie = req.cookies.get("docmind_keys")?.value;
+  // 2. Inject Secure HTTP-only API Keys server-to-server (User-scoped cookie first)
+  const userKeysCookie = userId && userId !== "default_user" ? req.cookies.get(`docmind_keys_${userId}`)?.value : null;
+  const keysCookie = userKeysCookie || req.cookies.get("docmind_keys")?.value;
   if (keysCookie) {
-    const keys = safeParseJson(keysCookie);
+    const parsed = safeParseJson(keysCookie);
+    const keys = (userId && parsed && parsed[userId]) ? parsed[userId] : parsed;
     if (keys?.gemini && (!headers.get("X-Gemini-Key") || !headers.get("X-Gemini-Key")?.trim())) {
       headers.set("X-Gemini-Key", keys.gemini);
     }
