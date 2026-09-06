@@ -26,6 +26,9 @@ import {
   X,
   Share2,
   Globe,
+  Square,
+  Mic,
+  MicOff,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import Sidebar from "@/components/Sidebar";
@@ -126,6 +129,9 @@ export default function HomePage() {
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [editingTitleValue, setEditingTitleValue] = useState("");
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const recognitionRef = useRef<any>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   // New Upgrade Feature States
   const [isQuizOpen, setIsQuizOpen] = useState(false);
@@ -368,6 +374,12 @@ export default function HomePage() {
         e.preventDefault();
         setModal((prev) => (prev === "shortcuts" ? "none" : "shortcuts"));
       } else if (e.key === "Escape") {
+        if (abortControllerRef.current) {
+          abortControllerRef.current.abort();
+          abortControllerRef.current = null;
+          setIsStreaming(false);
+          showToast("Generation stopped", "info");
+        }
         setIsEditingTitle(false);
         setIsCommandPaletteOpen(false);
         setIsChatSearchOpen(false);
@@ -593,6 +605,99 @@ export default function HomePage() {
     }
   };
 
+  // ── Stop Generation ─────────────────────────────────────────────────────────
+  const handleStopGeneration = useCallback(() => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    setIsStreaming(false);
+    showToast("Generation stopped", "info");
+  }, [showToast]);
+
+  // ── Speech-to-Text / Voice Dictation ────────────────────────────────────────
+  const handleToggleSpeechRecognition = useCallback(() => {
+    if (typeof window === "undefined") return;
+
+    const SpeechRecognition =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      showToast("Speech recognition is not supported in this browser.", "error");
+      return;
+    }
+
+    if (isListening) {
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch {}
+      }
+      setIsListening(false);
+      return;
+    }
+
+    try {
+      const recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = "en-US";
+
+      recognition.onstart = () => {
+        setIsListening(true);
+        showToast("Listening… Speak clearly", "info");
+      };
+
+      recognition.onresult = (event: any) => {
+        let transcript = "";
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          transcript += event.results[i][0].transcript;
+        }
+        if (transcript.trim()) {
+          setInputValue((prev) => {
+            const separator = prev && !prev.endsWith(" ") ? " " : "";
+            return `${prev}${separator}${transcript.trim()}`;
+          });
+        }
+      };
+
+      recognition.onerror = (event: any) => {
+        console.warn("Speech recognition error:", event.error);
+        setIsListening(false);
+        if (event.error !== "no-speech") {
+          showToast(`Speech error: ${event.error}`, "error");
+        }
+      };
+
+      recognition.onend = () => {
+        setIsListening(false);
+      };
+
+      recognitionRef.current = recognition;
+      recognition.start();
+    } catch (err) {
+      console.warn("Speech recognition initialization failed:", err);
+      setIsListening(false);
+      showToast("Could not access microphone", "error");
+    }
+  }, [isListening, showToast]);
+
+  // Cleanup voice dictation and abort controller on unmount
+  useEffect(() => {
+    return () => {
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch {}
+      }
+      if (abortControllerRef.current) {
+        try {
+          abortControllerRef.current.abort();
+        } catch {}
+      }
+    };
+  }, []);
+
   // ── Send Message ────────────────────────────────────────────────────────────
   const handleSend = async (overrideText?: string | React.MouseEvent) => {
     const text = (typeof overrideText === "string" ? overrideText : inputValue).trim();
@@ -637,6 +742,9 @@ export default function HomePage() {
     let capturedSources: Source[] = [];
     let capturedMemories: MemoryItem[] = [];
 
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     try {
       await sendMessage(
         session.id,
@@ -655,22 +763,26 @@ export default function HomePage() {
             setStreamingMemories(mems);
           },
           onDone: () => {
+            abortControllerRef.current = null;
             setIsStreaming(false);
             setStreamingContent("");
             setStreamingMemories([]);
-            const assistantMsg: Message = {
-              id: `assistant-${Date.now()}`,
-              session_id: session!.id,
-              role: "assistant",
-              content: fullContent,
-              created_at: new Date().toISOString(),
-              sources: capturedSources,
-              memory_recalled: capturedMemories,
-            };
-            setMessages((prev) => [...prev, assistantMsg]);
+            if (fullContent.trim()) {
+              const assistantMsg: Message = {
+                id: `assistant-${Date.now()}`,
+                session_id: session!.id,
+                role: "assistant",
+                content: fullContent,
+                created_at: new Date().toISOString(),
+                sources: capturedSources,
+                memory_recalled: capturedMemories,
+              };
+              setMessages((prev) => [...prev, assistantMsg]);
+            }
             listSessions().then(setSessions).catch((err) => console.warn("Failed to refresh sessions list:", err));
           },
           onError: (errMsg) => {
+            abortControllerRef.current = null;
             setIsStreaming(false);
             setStreamingContent("");
             setStreamingMemories([]);
@@ -680,15 +792,18 @@ export default function HomePage() {
             }
           },
         },
-        useGlobalMemory
+        useGlobalMemory,
+        controller.signal
       );
     } catch (err) {
       console.warn("Chat transmission error:", err);
+      abortControllerRef.current = null;
       setIsStreaming(false);
       setStreamingContent("");
       setStreamingMemories([]);
       setError("An unexpected error occurred during chat transmission.");
     } finally {
+      abortControllerRef.current = null;
       setTimeout(() => setIsStreaming(false), 200);
     }
   };
@@ -707,38 +822,51 @@ export default function HomePage() {
     setError("");
 
     let fullContent = "";
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
 
     try {
-      await summarizeSession(activeSession.id, apiKeys, {
-        onToken: (token) => {
-          fullContent += token;
-          setStreamingContent(fullContent);
+      await summarizeSession(
+        activeSession.id,
+        apiKeys,
+        {
+          onToken: (token) => {
+            fullContent += token;
+            setStreamingContent(fullContent);
+          },
+          onDone: () => {
+            abortControllerRef.current = null;
+            setIsStreaming(false);
+            setStreamingContent("");
+            if (fullContent.trim()) {
+              const summaryMsg: Message = {
+                id: `summary-${Date.now()}`,
+                session_id: activeSession.id,
+                role: "assistant",
+                content: fullContent,
+                created_at: new Date().toISOString(),
+              };
+              setMessages((prev) => [...prev, summaryMsg]);
+            }
+            listSessions().then(setSessions).catch((err) => console.warn("Failed to refresh sessions list:", err));
+          },
+          onError: (errMsg) => {
+            abortControllerRef.current = null;
+            setIsStreaming(false);
+            setStreamingContent("");
+            setError(errMsg);
+          },
         },
-        onDone: () => {
-          setIsStreaming(false);
-          setStreamingContent("");
-          const summaryMsg: Message = {
-            id: `summary-${Date.now()}`,
-            session_id: activeSession.id,
-            role: "assistant",
-            content: fullContent,
-            created_at: new Date().toISOString(),
-          };
-          setMessages((prev) => [...prev, summaryMsg]);
-          listSessions().then(setSessions).catch((err) => console.warn("Failed to refresh sessions list:", err));
-        },
-        onError: (errMsg) => {
-          setIsStreaming(false);
-          setStreamingContent("");
-          setError(errMsg);
-        },
-      });
+        controller.signal
+      );
     } catch (err) {
       console.warn("Summarization error:", err);
+      abortControllerRef.current = null;
       setIsStreaming(false);
       setStreamingContent("");
       setError("An unexpected error occurred while generating summary.");
     } finally {
+      abortControllerRef.current = null;
       setTimeout(() => setIsStreaming(false), 200);
     }
   };
@@ -804,45 +932,61 @@ export default function HomePage() {
     let fullContent = "";
     let capturedSources: Source[] = [];
     let capturedMemories: MemoryItem[] = [];
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
 
     try {
-      await sendMessage(activeSession.id, lastUserMsg.content, apiKeys, {
-        onToken: (token) => {
-          fullContent += token;
-          setStreamingContent(fullContent);
+      await sendMessage(
+        activeSession.id,
+        lastUserMsg.content,
+        apiKeys,
+        {
+          onToken: (token) => {
+            fullContent += token;
+            setStreamingContent(fullContent);
+          },
+          onSources: (srcs) => {
+            capturedSources = srcs;
+          },
+          onMemoryRecalled: (mems) => {
+            capturedMemories = mems;
+            setStreamingMemories(mems);
+          },
+          onDone: () => {
+            abortControllerRef.current = null;
+            setIsStreaming(false);
+            setStreamingContent("");
+            setStreamingMemories([]);
+            if (fullContent.trim()) {
+              const assistantMsg: Message = {
+                id: `assistant-${Date.now()}`,
+                session_id: activeSession.id,
+                role: "assistant",
+                content: fullContent,
+                created_at: new Date().toISOString(),
+                sources: capturedSources,
+                memory_recalled: capturedMemories,
+              };
+              setMessages((prev) => [...prev, assistantMsg]);
+            }
+          },
+          onError: (errMsg) => {
+            abortControllerRef.current = null;
+            setIsStreaming(false);
+            setStreamingContent("");
+            setStreamingMemories([]);
+            setError(errMsg);
+          },
         },
-        onSources: (srcs) => {
-          capturedSources = srcs;
-        },
-        onMemoryRecalled: (mems) => {
-          capturedMemories = mems;
-          setStreamingMemories(mems);
-        },
-        onDone: () => {
-          setIsStreaming(false);
-          setStreamingContent("");
-          setStreamingMemories([]);
-          const assistantMsg: Message = {
-            id: `assistant-${Date.now()}`,
-            session_id: activeSession.id,
-            role: "assistant",
-            content: fullContent,
-            created_at: new Date().toISOString(),
-            sources: capturedSources,
-            memory_recalled: capturedMemories,
-          };
-          setMessages((prev) => [...prev, assistantMsg]);
-        },
-        onError: (errMsg) => {
-          setIsStreaming(false);
-          setStreamingContent("");
-          setStreamingMemories([]);
-          setError(errMsg);
-        },
-      });
+        useGlobalMemory,
+        controller.signal
+      );
     } catch (err) {
+      abortControllerRef.current = null;
       setIsStreaming(false);
       setError("Failed to regenerate response.");
+    } finally {
+      abortControllerRef.current = null;
     }
   };
 
@@ -989,6 +1133,9 @@ export default function HomePage() {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSend();
+    } else if (e.key === "Escape" && isStreaming) {
+      e.preventDefault();
+      handleStopGeneration();
     }
   };
 
@@ -1626,6 +1773,52 @@ export default function HomePage() {
                     style={{ display: "none" }}
                   />
 
+                  {/* Contextual Quick-Action Suggestion Chips */}
+                  {activeSession && (messages.length > 0 || currentDocs.length > 0) && !isStreaming && (
+                    <div className="input-suggestions-row">
+                      <button
+                        type="button"
+                        className="input-suggestion-chip"
+                        onClick={() => handleSend("Summarize the key takeaways and main conclusions from the attached documents in a concise bulleted executive briefing.")}
+                      >
+                        <Sparkles size={11} className="chip-sparkle" />
+                        <span>Executive Summary</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="input-suggestion-chip"
+                        onClick={() => handleSend("Extract all action items, deliverables, assignees, and key milestones mentioned in the documents.")}
+                      >
+                        <Sparkles size={11} className="chip-sparkle" />
+                        <span>Action Items</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="input-suggestion-chip"
+                        onClick={() => handleSend("Identify the primary risks, caveats, limitations, and potential vulnerabilities highlighted in these materials.")}
+                      >
+                        <Sparkles size={11} className="chip-sparkle" />
+                        <span>Risk Analysis</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="input-suggestion-chip"
+                        onClick={() => handleOpenQuiz()}
+                      >
+                        <Sparkles size={11} className="chip-sparkle" />
+                        <span>Practice Quiz</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="input-suggestion-chip"
+                        onClick={() => setIsCompareOpen(true)}
+                      >
+                        <Sparkles size={11} className="chip-sparkle" />
+                        <span>Compare Docs</span>
+                      </button>
+                    </div>
+                  )}
+
                   <div className="input-box-wrapper">
                     <motion.button
                       className="input-action-btn"
@@ -1635,8 +1828,23 @@ export default function HomePage() {
                       whileHover={{ scale: 1.15 }}
                       whileTap={{ scale: 0.88 }}
                       transition={{ type: "spring", stiffness: 450, damping: 20 }}
+                      type="button"
                     >
                       <Paperclip size={16} color="#FFFFFF" />
+                    </motion.button>
+
+                    {/* Voice Dictation (Speech-to-Text) Button */}
+                    <motion.button
+                      className={`input-action-btn ${isListening ? "listening-active" : ""}`}
+                      onClick={handleToggleSpeechRecognition}
+                      title={isListening ? "Stop voice dictation" : "Dictate message with microphone"}
+                      disabled={isStreaming}
+                      whileHover={{ scale: 1.15 }}
+                      whileTap={{ scale: 0.88 }}
+                      transition={{ type: "spring", stiffness: 450, damping: 20 }}
+                      type="button"
+                    >
+                      {isListening ? <MicOff size={16} color="#FFFFFF" /> : <Mic size={16} color="#FFFFFF" />}
                     </motion.button>
 
                     <textarea
@@ -1654,30 +1862,32 @@ export default function HomePage() {
                       disabled={isStreaming}
                     />
 
-                    <motion.button
-                      className="input-action-btn send-btn"
-                      onClick={handleSend}
-                      disabled={!inputValue.trim() || isStreaming}
-                      title="Send message (Enter)"
-                      whileHover={{ scale: !inputValue.trim() || isStreaming ? 1 : 1.1 }}
-                      whileTap={{ scale: !inputValue.trim() || isStreaming ? 1 : 0.88 }}
-                      transition={{ type: "spring", stiffness: 450, damping: 20 }}
-                    >
-                      {isStreaming ? (
-                        <div
-                          className="spin"
-                          style={{
-                            width: 13,
-                            height: 13,
-                            border: "1.5px solid #000000",
-                            borderTopColor: "transparent",
-                            borderRadius: "50%",
-                          }}
-                        />
-                      ) : (
+                    {isStreaming ? (
+                      <motion.button
+                        className="input-action-btn stop-btn"
+                        onClick={handleStopGeneration}
+                        title="Stop generating response (Esc)"
+                        whileHover={{ scale: 1.08 }}
+                        whileTap={{ scale: 0.92 }}
+                        transition={{ type: "spring", stiffness: 450, damping: 20 }}
+                        type="button"
+                      >
+                        <Square size={13} fill="#FFFFFF" color="#FFFFFF" />
+                      </motion.button>
+                    ) : (
+                      <motion.button
+                        className="input-action-btn send-btn"
+                        onClick={handleSend}
+                        disabled={!inputValue.trim()}
+                        title="Send message (Enter)"
+                        whileHover={{ scale: !inputValue.trim() ? 1 : 1.1 }}
+                        whileTap={{ scale: !inputValue.trim() ? 1 : 0.88 }}
+                        transition={{ type: "spring", stiffness: 450, damping: 20 }}
+                        type="button"
+                      >
                         <ArrowUp size={16} strokeWidth={2.5} color="#000000" />
-                      )}
-                    </motion.button>
+                      </motion.button>
+                    )}
                   </div>
 
                   <div className="input-footer-hints">
@@ -1916,58 +2126,6 @@ export default function HomePage() {
           ))}
         </AnimatePresence>
       </div>
-
-      {/* Full-Screen Drag & Drop Overlay */}
-      <AnimatePresence>
-        {isDraggingFile && (
-          <motion.div
-            initial={{ opacity: 0, scale: 0.98 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.98 }}
-            transition={{ type: "spring", stiffness: 400, damping: 25 }}
-            style={{
-              position: "fixed",
-              inset: 0,
-              zIndex: 9999,
-              background: "rgba(0, 0, 0, 0.88)",
-              backdropFilter: "blur(16px)",
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 16,
-              border: "2px dashed rgba(255, 255, 255, 0.4)",
-              margin: 16,
-              borderRadius: 24,
-              pointerEvents: "none",
-            }}
-          >
-            <div
-              style={{
-                width: 64,
-                height: 64,
-                borderRadius: "50%",
-                background: "rgba(255, 255, 255, 0.1)",
-                border: "1px solid rgba(255, 255, 255, 0.3)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                boxShadow: "0 0 30px rgba(255, 255, 255, 0.2)",
-              }}
-            >
-              <Upload size={28} color="#FFFFFF" />
-            </div>
-            <div style={{ textAlign: "center" }}>
-              <h3 style={{ fontSize: 18, fontWeight: 700, color: "#FFFFFF", marginBottom: 4 }}>
-                Drop files to upload to DocMind
-              </h3>
-              <p style={{ fontSize: 12, color: "#A3A3A3" }}>
-                PDF, DOCX, TXT, CSV, or Markdown files will be processed and indexed automatically
-              </p>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
 
       {/* User Authentication & Profile Modal */}
       <AuthModal />

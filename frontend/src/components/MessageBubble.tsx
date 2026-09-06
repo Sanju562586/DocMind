@@ -20,6 +20,9 @@ import {
   Layers,
   FileText,
   ExternalLink,
+  Volume2,
+  VolumeX,
+  Clock,
 } from "lucide-react";
 import { Message, Source, MemoryItem } from "@/lib/types";
 import { format, parseISO } from "date-fns";
@@ -273,6 +276,49 @@ export function MessageBubble({ message, isLatest, onOpenCitation, onSelectFollo
     );
   }
 
+  const [isCopied, setIsCopied] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+
+  useEffect(() => {
+    return () => {
+      if (typeof window !== "undefined" && "speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+      }
+    };
+  }, []);
+
+  const handleCopyMessage = async () => {
+    const ok = await copyToClipboard(message.content);
+    if (ok) {
+      setIsCopied(true);
+      setTimeout(() => setIsCopied(false), 2000);
+    }
+  };
+
+  const handleToggleSpeech = () => {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
+    if (isSpeaking) {
+      window.speechSynthesis.cancel();
+      setIsSpeaking(false);
+      return;
+    }
+    window.speechSynthesis.cancel();
+    const cleanSpeech = message.content
+      .replace(/```[\s\S]*?```/g, "Code block omitted.")
+      .replace(/`([^`]+)`/g, "$1")
+      .replace(/#+\s*/g, "")
+      .replace(/[*_~[\]()]/g, "")
+      .replace(/\n+/g, " ");
+
+    const utterance = new SpeechSynthesisUtterance(cleanSpeech);
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
+    utterance.onend = () => setIsSpeaking(false);
+    utterance.onerror = () => setIsSpeaking(false);
+    setIsSpeaking(true);
+    window.speechSynthesis.speak(utterance);
+  };
+
   const timeStr = useMemo(() => {
     try {
       return format(new Date(message.created_at), "h:mm a");
@@ -280,6 +326,17 @@ export function MessageBubble({ message, isLatest, onOpenCitation, onSelectFollo
       return "";
     }
   }, [message.created_at]);
+
+  const wordCount = useMemo(() => {
+    if (isUser || !message.content) return 0;
+    return message.content.trim().split(/\s+/).length;
+  }, [isUser, message.content]);
+
+  const readTimeMinutes = useMemo(() => {
+    if (wordCount < 50) return null;
+    const mins = Math.max(1, Math.round(wordCount / 200));
+    return `~${mins} min read`;
+  }, [wordCount]);
 
   const hasSources = !isUser && message.sources && message.sources.length > 0;
 
@@ -358,8 +415,77 @@ export function MessageBubble({ message, isLatest, onOpenCitation, onSelectFollo
           </div>
         )}
 
-        <div className="message-timestamp">
-          {isUser ? "You" : "DocMind AI"} {timeStr && `• ${timeStr}`}
+        {/* Interactive Action Bar & Metadata */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 6, padding: "0 4px" }}>
+          <div className="message-timestamp">
+            {isUser ? "You" : "DocMind AI"} {timeStr && `• ${timeStr}`}
+            {!isUser && wordCount > 0 && (
+              <span style={{ marginLeft: 8, color: "var(--text-subtle)", fontSize: 11 }}>
+                ({wordCount} words{readTimeMinutes ? ` • ${readTimeMinutes}` : ""})
+              </span>
+            )}
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            {/* Read Aloud Button (Assistant Only) */}
+            {!isUser && typeof window !== "undefined" && "speechSynthesis" in window && (
+              <motion.button
+                onClick={handleToggleSpeech}
+                whileHover={{ scale: 1.1 }}
+                whileTap={{ scale: 0.9 }}
+                title={isSpeaking ? "Stop reading" : "Read aloud"}
+                style={{
+                  background: isSpeaking ? "rgba(239, 68, 68, 0.15)" : "rgba(255, 255, 255, 0.04)",
+                  border: isSpeaking ? "1px solid rgba(239, 68, 68, 0.4)" : "1px solid rgba(255, 255, 255, 0.08)",
+                  borderRadius: "var(--radius-xs)",
+                  padding: "3px 7px",
+                  color: isSpeaking ? "#EF4444" : "var(--text-muted)",
+                  cursor: "pointer",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 4,
+                  fontSize: 11,
+                  transition: "all 0.15s ease",
+                }}
+              >
+                {isSpeaking ? <VolumeX size={11} /> : <Volume2 size={11} />}
+                <span style={{ fontSize: 10 }}>{isSpeaking ? "Stop" : "Listen"}</span>
+              </motion.button>
+            )}
+
+            {/* Copy Response / Prompt Button */}
+            <motion.button
+              onClick={handleCopyMessage}
+              whileHover={{ scale: 1.1 }}
+              whileTap={{ scale: 0.9 }}
+              title={isUser ? "Copy prompt" : "Copy full response"}
+              style={{
+                background: isCopied ? "rgba(34, 197, 94, 0.15)" : "rgba(255, 255, 255, 0.04)",
+                border: isCopied ? "1px solid rgba(34, 197, 94, 0.4)" : "1px solid rgba(255, 255, 255, 0.08)",
+                borderRadius: "var(--radius-xs)",
+                padding: "3px 7px",
+                color: isCopied ? "#22C55E" : "var(--text-muted)",
+                cursor: "pointer",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                fontSize: 11,
+                transition: "all 0.15s ease",
+              }}
+            >
+              {isCopied ? (
+                <>
+                  <Check size={11} color="#22C55E" />
+                  <span style={{ fontSize: 10, color: "#22C55E" }}>Copied</span>
+                </>
+              ) : (
+                <>
+                  <Copy size={11} />
+                  <span style={{ fontSize: 10 }}>Copy</span>
+                </>
+              )}
+            </motion.button>
+          </div>
         </div>
       </div>
     </motion.div>

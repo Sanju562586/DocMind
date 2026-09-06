@@ -474,7 +474,8 @@ export async function sendMessage(
   message: string,
   keys: Partial<ApiKeys> | undefined,
   callbacks: ChatStreamCallbacks,
-  useGlobalMemory: boolean = true
+  useGlobalMemory: boolean = true,
+  signal?: AbortSignal
 ): Promise<void> {
   try {
     const headers = buildHeaders(keys);
@@ -482,6 +483,7 @@ export async function sendMessage(
     const res = await fetch(`${API_BASE}/chat`, {
       method: "POST",
       headers,
+      signal,
       body: JSON.stringify({
         session_id: sessionId,
         message,
@@ -531,7 +533,11 @@ export async function sendMessage(
         }
       }
     }
-  } catch (err) {
+  } catch (err: any) {
+    if (err?.name === "AbortError" || signal?.aborted) {
+      callbacks.onDone();
+      return;
+    }
     callbacks.onError(
       parseErrorMessage(err, "Connection error: Unable to reach backend server. Please check your network or server status.")
     );
@@ -543,7 +549,8 @@ export async function sendMessage(
 export async function summarizeSession(
   sessionId: string,
   keys: Partial<ApiKeys> | undefined,
-  callbacks: ChatStreamCallbacks
+  callbacks: ChatStreamCallbacks,
+  signal?: AbortSignal
 ): Promise<void> {
   try {
     const headers = buildHeaders(keys);
@@ -551,6 +558,7 @@ export async function summarizeSession(
     const res = await fetch(`${API_BASE}/sessions/${sessionId}/summarize`, {
       method: "POST",
       headers,
+      signal,
     });
 
     if (!res.ok) {
@@ -590,7 +598,11 @@ export async function summarizeSession(
         }
       }
     }
-  } catch (err) {
+  } catch (err: any) {
+    if (err?.name === "AbortError" || signal?.aborted) {
+      callbacks.onDone();
+      return;
+    }
     callbacks.onError(
       parseErrorMessage(err, "Connection error: Unable to reach backend server. Please verify the backend is running.")
     );
