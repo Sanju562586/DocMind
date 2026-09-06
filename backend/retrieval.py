@@ -580,10 +580,10 @@ class HybridRetriever:
         npz_path = os.path.join(self.index_dir, f"session_{session_id}.npz")
         if os.path.exists(npz_path):
             try:
-                # Load embeddings and chunks cleanly
-                data = np.load(npz_path, allow_pickle=True)
-                embeddings = data["embeddings"]
-                chunks_json_str = str(data["chunks_json"])
+                # Load embeddings and chunks cleanly with context manager to release Windows file handles
+                with np.load(npz_path, allow_pickle=True) as data:
+                    embeddings = np.array(data["embeddings"])
+                    chunks_json_str = str(data["chunks_json"])
                 chunks_data = json.loads(chunks_json_str)
                 chunks = [_dict_to_chunk(d) for d in chunks_data]
 

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, List, Dict, Any
 import re
 
@@ -44,6 +44,7 @@ class SessionTitleUpdate(BaseModel):
 
 
 class DocumentResponse(BaseModel):
+    id: Optional[str] = None
     doc_id: str
     session_id: str
     filename: str
@@ -54,6 +55,14 @@ class DocumentResponse(BaseModel):
     status: Optional[str] = None
     error_message: Optional[str] = None
     created_at: Optional[str] = None
+
+    @model_validator(mode="after")
+    def sync_ids(self):
+        if not self.id and self.doc_id:
+            self.id = self.doc_id
+        elif not self.doc_id and self.id:
+            self.doc_id = self.id
+        return self
 
 
 class MemoryItem(BaseModel):

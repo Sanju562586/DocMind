@@ -60,6 +60,15 @@ class UpstashRateLimiter:
         cutoff = now - window_seconds
 
         with self._lock:
+            # Periodically prune stale keys to prevent unbounded memory growth
+            if len(self._memory_store) > 1000:
+                stale_keys = [
+                    k for k, ts in self._memory_store.items()
+                    if not ts or ts[-1] <= cutoff
+                ]
+                for k in stale_keys:
+                    self._memory_store.pop(k, None)
+
             # Filter timestamps within window
             timestamps = [t for t in self._memory_store[key] if t > cutoff]
             current_count = len(timestamps)

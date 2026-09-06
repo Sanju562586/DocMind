@@ -87,17 +87,20 @@ async function handleProxy(
 
   const method = req.method;
   const isBodyAllowed = method !== "GET" && method !== "HEAD";
-  const body = isBodyAllowed ? req.body : undefined;
+
+  const fetchOptions: RequestInit = {
+    method,
+    headers,
+    cache: "no-store",
+  };
+  if (isBodyAllowed && req.body) {
+    fetchOptions.body = req.body;
+    // @ts-expect-error - duplex is required for streaming request bodies in Node fetch
+    fetchOptions.duplex = "half";
+  }
 
   try {
-    const res = await fetch(targetUrl.toString(), {
-      method,
-      headers,
-      body,
-      // @ts-expect-error - duplex is required for streaming request bodies in Node fetch
-      duplex: isBodyAllowed && body ? "half" : undefined,
-      cache: "no-store",
-    });
+    const res = await fetch(targetUrl.toString(), fetchOptions);
 
     const isSSE = res.headers.get("content-type")?.includes("text/event-stream");
 

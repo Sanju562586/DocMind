@@ -29,6 +29,7 @@ import {
 import { getSharedChat } from "@/lib/api";
 import { SharedSession, Source } from "@/lib/types";
 import { preprocessMarkdown } from "@/lib/markdown";
+import { copyToClipboard } from "@/lib/clipboard";
 
 // ── Copyable Code Block Component ─────────────────────────────────────────────
 
@@ -38,10 +39,12 @@ function CodeBlock({ children, className }: { children: React.ReactNode; classNa
   const language = match ? match[1] : "";
   const codeText = String(children).replace(/\n$/, "");
 
-  const handleCopy = () => {
-    navigator.clipboard.writeText(codeText);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  const handleCopy = async () => {
+    const ok = await copyToClipboard(codeText);
+    if (ok) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
   };
 
   return (
@@ -205,18 +208,22 @@ export default function SharedChatPage() {
     });
   };
 
-  const handleCopyLink = () => {
+  const handleCopyLink = async () => {
     if (typeof window === "undefined") return;
-    navigator.clipboard.writeText(window.location.href);
-    setCopiedLink(true);
-    setTimeout(() => setCopiedLink(false), 2200);
+    const ok = await copyToClipboard(window.location.href);
+    if (ok) {
+      setCopiedLink(true);
+      setTimeout(() => setCopiedLink(false), 2200);
+    }
   };
 
-  const handleCopyMessage = (msgId: string, text: string) => {
+  const handleCopyMessage = async (msgId: string, text: string) => {
     if (typeof window === "undefined") return;
-    navigator.clipboard.writeText(text);
-    setCopiedMsgId(msgId);
-    setTimeout(() => setCopiedMsgId(null), 2000);
+    const ok = await copyToClipboard(text);
+    if (ok) {
+      setCopiedMsgId(msgId);
+      setTimeout(() => setCopiedMsgId(null), 2000);
+    }
   };
 
   const toggleSourceExpansion = (messageId: string) => {

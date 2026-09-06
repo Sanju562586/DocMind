@@ -1279,10 +1279,37 @@ async def ingest_url_to_session(
             if settings.enable_metrics:
                 metrics.record_document_processed("url", "success")
             logger.info("URL processing complete for '%s' [OK] (%d chunks indexed)", url, len(chunks))
+        except asyncio.TimeoutError:
+            logger.error("Processing timed out for URL '%s'", url)
+            store.update_document_processed(
+                doc_id=d_id,
+                chunk_count=0,
+                char_count=0,
+                word_count=0,
+                status="error",
+                error_message="URL processing timed out during chunking or indexing.",
+            )
+            if settings.enable_metrics:
+                metrics.record_document_processed("url", "timeout")
+        except asyncio.CancelledError:
+            logger.warning("Background processing cancelled for URL '%s'", url)
+            store.update_document_processed(
+                doc_id=d_id,
+                chunk_count=0,
+                char_count=0,
+                word_count=0,
+                status="error",
+                error_message="URL processing was cancelled.",
+            )
         except Exception as exc:
             logger.exception("URL background processing failed for '%s': %s", url, exc)
             store.update_document_processed(
-                doc_id=d_id, chunk_count=0, char_count=0, word_count=0, status="error"
+                doc_id=d_id,
+                chunk_count=0,
+                char_count=0,
+                word_count=0,
+                status="error",
+                error_message=f"Processing failed: {str(exc)}",
             )
             if settings.enable_metrics:
                 metrics.record_document_processed("url", "error")

@@ -27,6 +27,7 @@ import TiltCard from "./TiltCard";
 import NeuralWaveform from "./NeuralWaveform";
 
 import { preprocessMarkdown } from "@/lib/markdown";
+import { copyToClipboard } from "@/lib/clipboard";
 
 
 // ── Copyable Code Block Component ─────────────────────────────────────────────
@@ -37,10 +38,12 @@ function CodeBlock({ children, className }: { children: React.ReactNode; classNa
   const language = match ? match[1] : "";
   const codeText = String(children).replace(/\n$/, "");
 
-  const handleCopy = () => {
-    navigator.clipboard.writeText(codeText);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  const handleCopy = async () => {
+    const ok = await copyToClipboard(codeText);
+    if (ok) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
   };
 
   return (

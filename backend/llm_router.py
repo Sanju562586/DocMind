@@ -146,6 +146,9 @@ class GeminiProvider(LLMProvider):
 
             except Exception as exc:
                 last_exc = exc
+                if yielded_any:
+                    logger.error("Gemini SDK streaming failed mid-stream after yielding tokens: %s", exc)
+                    raise exc
                 logger.warning("Gemini SDK model %s failed: %s. Trying REST API fallback...", m_name, exc)
 
             # 2. Direct HTTP REST API streaming fallback
@@ -195,6 +198,9 @@ class GeminiProvider(LLMProvider):
 
             except Exception as exc:
                 last_exc = exc
+                if yielded_any:
+                    logger.error("Gemini REST streaming failed mid-stream after yielding tokens: %s", exc)
+                    raise exc
                 logger.warning("Gemini REST model %s failed: %s. Trying next...", m_name, exc)
                 continue
 
@@ -274,6 +280,9 @@ class GroqProvider(LLMProvider):
                     return
             except Exception as exc:
                 last_exc = exc
+                if yielded_any:
+                    logger.error("Groq streaming failed mid-stream after yielding tokens: %s", exc)
+                    raise exc
                 logger.warning("Groq model %s failed: %s. Trying next...", m_name, exc)
                 continue
 
@@ -356,6 +365,9 @@ class OpenRouterProvider(LLMProvider):
                     return
             except Exception as exc:
                 last_exc = exc
+                if yielded_any:
+                    logger.error("OpenRouter streaming failed mid-stream after yielding tokens: %s", exc)
+                    raise exc
                 logger.warning("OpenRouter model %s failed: %s. Trying next...", m_name, exc)
                 continue
 
@@ -418,6 +430,9 @@ class LLMRouter:
 
             except Exception as exc:
                 err_msg = f"{provider.name}: {type(exc).__name__}: {str(exc)[:120]}"
+                if token_count > 0:
+                    logger.error("Provider %s failed mid-stream after emitting %d tokens: %s", provider.name, token_count, err_msg)
+                    raise RuntimeError(f"Stream interrupted during generation ({provider.name}): {str(exc)[:150]}")
                 logger.warning("Provider %s failed, falling back to next provider - %s", provider.name, err_msg)
                 errors.append(err_msg)
                 continue

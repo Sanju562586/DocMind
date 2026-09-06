@@ -190,13 +190,20 @@ class DocumentParser:
         if not is_safe_url(url):
             raise ValueError("Access to local, private, or loopback network addresses is prohibited.")
 
+        class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                if not is_safe_url(newurl):
+                    raise ValueError(f"Redirect to prohibited network address rejected: {newurl}")
+                return super().redirect_request(req, fp, code, msg, headers, newurl)
+
         req = urllib.request.Request(
             url,
             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DocMind/2.0"}
         )
 
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            opener = urllib.request.build_opener(_SafeRedirectHandler())
+            with opener.open(req, timeout=15) as resp:
                 # Limit URL response size to 10 MB
                 html = resp.read(10_485_760).decode("utf-8", errors="ignore")
         except Exception as exc:
@@ -425,10 +432,20 @@ class DocumentParser:
     def _parse_csv(self, path: str, filename: str) -> Tuple[str, Dict]:
         import pandas as pd
 
-        try:
-            df = pd.read_csv(path, nrows=5000)
-        except UnicodeDecodeError:
-            df = pd.read_csv(path, encoding="latin-1", nrows=5000)
+        df = None
+        for enc in ("utf-8", "latin-1", "cp1252"):
+            try:
+                df = pd.read_csv(path, encoding=enc, nrows=5000, on_bad_lines="skip")
+                break
+            except Exception:
+                try:
+                    df = pd.read_csv(path, sep=None, engine="python", encoding=enc, nrows=5000, on_bad_lines="skip")
+                    break
+                except Exception:
+                    continue
+
+        if df is None or len(df.columns) == 0:
+            return self._parse_text(path, filename)
 
         # Sanitize CSV formula injection for preview
         def sanitize_cell(v: Any) -> str:
@@ -472,30 +489,38 @@ class DocumentParser:
                 return "'" + s
             return s
 
-        xls = pd.ExcelFile(path)
         try:
-            parts = []
-            for sheet_name in xls.sheet_names[:10]:
-                df = pd.read_excel(xls, sheet_name=sheet_name, nrows=500)
-                rows = [" | ".join(sanitize_cell(v) for v in df.columns)]
-                rows.append("-" * len(rows[0]))
-                for _, row in df.iterrows():
-                    rows.append(" | ".join(sanitize_cell(v) for v in row.values))
-                parts.append(f"## Sheet: {sheet_name}\n\n" + "\n".join(rows))
+            xls = pd.ExcelFile(path)
+            try:
+                parts = []
+                for sheet_name in xls.sheet_names[:10]:
+                    try:
+                        df = pd.read_excel(xls, sheet_name=sheet_name, nrows=500)
+                        rows = [" | ".join(sanitize_cell(v) for v in df.columns)]
+                        rows.append("-" * len(rows[0]))
+                        for _, row in df.iterrows():
+                            rows.append(" | ".join(sanitize_cell(v) for v in row.values))
+                        parts.append(f"## Sheet: {sheet_name}\n\n" + "\n".join(rows))
+                    except Exception as sheet_err:
+                        logger.warning("Error reading sheet %s in %s: %s", sheet_name, filename, sheet_err)
+                        parts.append(f"## Sheet: {sheet_name}\n\n(Error reading sheet data)")
 
-            full_text = f"# Excel File: {filename}\n\n" + "\n\n".join(parts)
-            full_text = self._clean_text(full_text)
+                full_text = f"# Excel File: {filename}\n\n" + "\n\n".join(parts)
+                full_text = self._clean_text(full_text)
 
-            metadata = {
-                "title": filename,
-                "source": filename,
-                "file_type": "xlsx",
-                "page_count": len(xls.sheet_names),
-                "word_count": len(full_text.split()),
-            }
-            return full_text, metadata
-        finally:
-            xls.close()
+                metadata = {
+                    "title": filename,
+                    "source": filename,
+                    "file_type": "xlsx",
+                    "page_count": len(xls.sheet_names),
+                    "word_count": len(full_text.split()),
+                }
+                return full_text, metadata
+            finally:
+                xls.close()
+        except Exception as exc:
+            logger.warning("Failed to parse Excel file %s with pandas: %s. Falling back to universal parser.", filename, exc)
+            return self._parse_universal_fallback(path, filename, ".xlsx")
 
     def _parse_pptx(self, path: str, filename: str) -> Tuple[str, Dict]:
         """Parse PowerPoint presentations (PPTX / PPT / ODP)."""
@@ -736,6 +761,8 @@ class DocumentParser:
 
     @staticmethod
     def _clean_text(text: str) -> str:
+        import html
+        text = html.unescape(text)
         text = text.replace("\r\n", "\n").replace("\r", "\n")
         # Normalize docx bullet symbols (e.g. \uf0b7, •, ▪, ‣) to standard '- '
         text = re.sub(r"^[ \t]*[\uf0b7•▪‣⁃][ \t]*", "- ", text, flags=re.MULTILINE)

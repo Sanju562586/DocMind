@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { Session } from "@/lib/types";
 import { createShareLink, revokeShareLink } from "@/lib/api";
+import { copyToClipboard } from "@/lib/clipboard";
 
 interface ShareModalProps {
   isOpen: boolean;
@@ -82,11 +83,11 @@ export function ShareModal({
 
   const handleCopy = async () => {
     if (!shareUrl) return;
-    try {
-      await navigator.clipboard.writeText(shareUrl);
+    const ok = await copyToClipboard(shareUrl);
+    if (ok) {
       setCopied(true);
       setTimeout(() => setCopied(false), 2200);
-    } catch {
+    } else {
       setError("Failed to copy link to clipboard");
     }
   };

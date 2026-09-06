@@ -82,6 +82,17 @@ class AsyncTaskQueue:
             args=args,
             kwargs=kwargs,
         )
+        # Prune old completed/failed task records to prevent unbounded memory growth
+        if len(self._tasks) > 500:
+            finished = [
+                (tid, j.completed_at or j.created_at)
+                for tid, j in self._tasks.items()
+                if j.status in ("completed", "failed", "cancelled")
+            ]
+            finished.sort(key=lambda x: x[1])
+            for tid, _ in finished[:100]:
+                self._tasks.pop(tid, None)
+
         self._tasks[task_id] = job
         try:
             self._queue.put_nowait(job)
@@ -111,6 +122,9 @@ class AsyncTaskQueue:
                     logger.exception("TaskJob %s (%s) failed on worker %d: %s", job.id, job.name, worker_id, exc)
                 finally:
                     job.completed_at = time.time()
+                    # Free references to arguments and payloads
+                    job.args = ()
+                    job.kwargs = {}
                     self._queue.task_done()
             except asyncio.CancelledError:
                 break

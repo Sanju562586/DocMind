@@ -21,6 +21,7 @@ export interface KeyStatus {
 }
 
 export interface Document {
+  id?: string;
   doc_id: string;
   session_id: string;
   filename: string;

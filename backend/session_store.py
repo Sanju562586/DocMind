@@ -49,12 +49,17 @@ class _DBConnectionWrapper:
     def execute(self, sql: str, params: tuple = ()):
         if self.is_postgres:
             pg_sql = sql.replace("?", "%s")
+            # Translate SQLite INSERT OR IGNORE to PostgreSQL ON CONFLICT DO NOTHING
+            if "INSERT OR IGNORE INTO" in pg_sql or "insert or ignore into" in pg_sql:
+                import re
+                pg_sql = re.sub(r"INSERT\s+OR\s+IGNORE\s+INTO", "INSERT INTO", pg_sql, flags=re.IGNORECASE)
+                if "ON CONFLICT" not in pg_sql.upper():
+                    pg_sql = pg_sql.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
+
             # Replace SQLite datetime functions with standard PostgreSQL functions
             pg_sql = pg_sql.replace("datetime('now')", "CURRENT_TIMESTAMP")
-            if "is_shared = 1" in pg_sql:
-                pg_sql = pg_sql.replace("is_shared = 1", "is_shared = TRUE")
-            elif "is_shared = 0" in pg_sql:
-                pg_sql = pg_sql.replace("is_shared = 0", "is_shared = FALSE")
+            pg_sql = pg_sql.replace("is_shared = 1", "is_shared = TRUE")
+            pg_sql = pg_sql.replace("is_shared = 0", "is_shared = FALSE")
 
             cur = self._raw_conn.cursor(cursor_factory=RealDictCursor)
             cur.execute(pg_sql, params)
@@ -335,7 +340,9 @@ class SessionStore:
         if not row:
             return {}
         d = dict(row)
-        d["doc_id"] = d.get("id", "")
+        doc_id = d.get("id") or d.get("doc_id") or ""
+        d["id"] = doc_id
+        d["doc_id"] = doc_id
         d["error_message"] = d.get("error_message")
         return d
 
@@ -487,6 +494,38 @@ class SessionStore:
         except Exception as exc:
             logger.debug("Cloud session delete notice: %s", exc)
 
+    def _cloud_delete_all_sessions(self, user_id: Optional[str] = None):
+        """Remove all sessions and child records for a user from Upstash cloud store."""
+        if not self.is_cloud_sync_enabled:
+            return
+        try:
+            u_id = user_id or "default_user"
+            user_keys = [f"docmind:user:{u_id}:sessions"]
+            if u_id != "default_user":
+                user_keys.append("docmind:user:default_user:sessions")
+
+            pipeline_req = [["SMEMBERS", k] for k in user_keys]
+            resp = self._upstash_cmd("pipeline", pipeline_req)
+            if resp and isinstance(resp, list):
+                del_pipe = []
+                for r in resp:
+                    items = r.get("result", [])
+                    if isinstance(items, list):
+                        for sid in items:
+                            if sid and isinstance(sid, str):
+                                del_pipe.extend([
+                                    ["DEL", f"docmind:session:{sid}:meta"],
+                                    ["DEL", f"docmind:session:{sid}:messages"],
+                                    ["DEL", f"docmind:session:{sid}:docs"],
+                                    ["SREM", "docmind:all_sessions", sid],
+                                ])
+                for k in user_keys:
+                    del_pipe.append(["DEL", k])
+                if del_pipe:
+                    self._upstash_cmd("pipeline", del_pipe)
+        except Exception as exc:
+            logger.debug("Cloud delete all sessions notice: %s", exc)
+
     def sync_user_sessions_from_cloud(self, user_id: str) -> int:
         """
         Pull all sessions, documents, and messages for this user from Upstash Redis
@@ -556,7 +595,7 @@ class SessionStore:
                                 meta["id"],
                                 meta.get("user_id") or user_id,
                                 meta.get("title", "Conversation"),
-                                meta.get("is_shared", 0),
+                                bool(meta.get("is_shared", False)),
                                 meta.get("share_token"),
                                 meta.get("updated_at") or datetime.utcnow().isoformat(),
                                 meta.get("created_at") or meta.get("updated_at") or datetime.utcnow().isoformat(),
@@ -1302,6 +1341,7 @@ class SessionStore:
             else:
                 conn.execute("DELETE FROM sessions")
                 conn.execute("DELETE FROM global_memory")
+        self._cloud_delete_all_sessions(user_id=user_id)
 
     def get_stats(self, user_id: Optional[str] = None) -> Dict[str, Any]:
         """Aggregate statistics across the platform or per user."""
