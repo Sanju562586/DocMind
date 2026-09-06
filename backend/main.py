@@ -265,6 +265,38 @@ app = FastAPI(title="DocMind Document Intelligence API", version="2.3.0", lifesp
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _custom_rate_limit_exceeded_handler)
 
+
+@app.exception_handler(HTTPException)
+async def custom_http_exception_handler(request: Request, exc: HTTPException) -> Response:
+    """Ensure HTTP exceptions (404, 400, etc.) always return CORS headers to the browser."""
+    origin = request.headers.get("origin")
+    headers = dict(exc.headers) if exc.headers else {}
+    if origin:
+        headers["Access-Control-Allow-Origin"] = origin
+        headers["Access-Control-Allow-Credentials"] = "true"
+        headers["Access-Control-Allow-Methods"] = "*"
+        headers["Access-Control-Allow-Headers"] = "*"
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail}, headers=headers)
+
+
+@app.exception_handler(Exception)
+async def custom_generic_exception_handler(request: Request, exc: Exception) -> Response:
+    """Ensure unhandled 500 errors always return CORS headers to prevent browser masking."""
+    logger.exception("Unhandled server exception on %s %s: %s", request.method, request.url.path, exc)
+    origin = request.headers.get("origin")
+    headers = {}
+    if origin:
+        headers["Access-Control-Allow-Origin"] = origin
+        headers["Access-Control-Allow-Credentials"] = "true"
+        headers["Access-Control-Allow-Methods"] = "*"
+        headers["Access-Control-Allow-Headers"] = "*"
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error: {str(exc)}"},
+        headers=headers,
+    )
+
+
 cors_origins = settings.cors_origins if settings.cors_origins else ["http://localhost:3000", "http://127.0.0.1:3000"]
 app.add_middleware(
     CORSMiddleware,
