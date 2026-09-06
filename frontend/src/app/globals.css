@@ -127,6 +127,34 @@ body {
   background: rgba(255, 255, 255, 0.35);
 }
 
+/* ── Public Shared Chat Page Container ───────────────────────────────────── */
+.shared-chat-page {
+  height: 100vh !important;
+  height: 100dvh !important;
+  width: 100% !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  -webkit-overflow-scrolling: touch !important;
+  overscroll-behavior-y: contain !important;
+  scroll-behavior: smooth !important;
+  position: relative !important;
+}
+
+.shared-chat-page::-webkit-scrollbar {
+  width: 7px;
+}
+.shared-chat-page::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.5);
+}
+.shared-chat-page::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.25);
+  border-radius: 99px;
+  transition: background 0.2s ease;
+}
+.shared-chat-page::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.45);
+}
+
 /* ── Monochromatic 3D Interactive Background & Ambient Orbs ──────────────── */
 .interactive-bg-wrapper {
   position: fixed;
@@ -1223,11 +1251,15 @@ body {
   padding: 0 4px;
 }
 
-/* ── Markdown Content Typography in AI Response ─────────────────────────── */
+/* ── Markdown Content Typography in AI Response & Shared Transcript ───────── */
 .message-bubble h1,
 .message-bubble h2,
 .message-bubble h3,
-.message-bubble h4 {
+.message-bubble h4,
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4 {
   color: #FFFFFF;
   font-weight: 700;
   margin-top: 14px;
@@ -1235,27 +1267,29 @@ body {
   line-height: 1.35;
 }
 
-.message-bubble h1 { font-size: 17px; }
-.message-bubble h2 { font-size: 15px; border-bottom: 1px solid var(--border-subtle); padding-bottom: 4px; }
-.message-bubble h3 { font-size: 14px; }
+.message-bubble h1, .markdown-body h1 { font-size: 17px; }
+.message-bubble h2, .markdown-body h2 { font-size: 15px; border-bottom: 1px solid var(--border-subtle); padding-bottom: 4px; }
+.message-bubble h3, .markdown-body h3 { font-size: 14px; }
 
-.message-bubble p {
+.message-bubble p, .markdown-body p {
   margin-bottom: 10px;
 }
-.message-bubble p:last-child {
+.message-bubble p:last-child, .markdown-body p:last-child {
   margin-bottom: 0;
 }
 
 .message-bubble ul,
-.message-bubble ol {
+.message-bubble ol,
+.markdown-body ul,
+.markdown-body ol {
   margin: 8px 0 10px 20px;
 }
 
-.message-bubble li {
+.message-bubble li, .markdown-body li {
   margin-bottom: 4px;
 }
 
-.message-bubble blockquote {
+.message-bubble blockquote, .markdown-body blockquote {
   border-left: 3px solid #FFFFFF;
   padding: 6px 12px;
   background: rgba(255, 255, 255, 0.04);
@@ -1264,7 +1298,7 @@ body {
   color: var(--text-secondary);
 }
 
-.message-bubble table {
+.message-bubble table, .markdown-body table {
   width: 100%;
   border-collapse: collapse;
   margin: 12px 0;
@@ -1276,20 +1310,23 @@ body {
 }
 
 .message-bubble th,
-.message-bubble td {
+.message-bubble td,
+.markdown-body th,
+.markdown-body td {
   padding: 8px 12px;
   text-align: left;
   border-bottom: 1px solid var(--border-subtle);
 }
 
-.message-bubble th {
+.message-bubble th, .markdown-body th {
   background: rgba(255, 255, 255, 0.08);
   color: #FFFFFF;
   font-weight: 600;
 }
 
 /* ── KaTeX Math Formula Rendering ─────────────────────────────────────────── */
-.message-bubble .katex-display {
+.message-bubble .katex-display,
+.markdown-body .katex-display {
   margin: 14px 0;
   padding: 10px 14px;
   background: rgba(255, 255, 255, 0.03);
@@ -1300,16 +1337,19 @@ body {
   -webkit-overflow-scrolling: touch;
 }
 
-.message-bubble .katex {
+.message-bubble .katex,
+.markdown-body .katex {
   font-size: 1.06em;
   color: #FFFFFF;
 }
 
-.message-bubble .katex-html {
+.message-bubble .katex-html,
+.markdown-body .katex-html {
   white-space: normal;
 }
 
-.message-bubble .katex-error {
+.message-bubble .katex-error,
+.markdown-body .katex-error {
   color: #E2E8F0 !important;
   background: rgba(255, 255, 255, 0.08);
   padding: 2px 6px;

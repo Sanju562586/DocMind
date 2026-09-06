@@ -1,9 +1,9 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef, useCallback } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -11,18 +11,20 @@ import rehypeKatex from "rehype-katex";
 import { format } from "date-fns";
 import {
   Sparkles,
-  Share2,
   Copy,
   Check,
   FileText,
   Lock,
   Globe,
   ArrowLeft,
+  ArrowUp,
+  ArrowDown,
   ExternalLink,
   ShieldCheck,
   ChevronDown,
   ChevronUp,
   Clock,
+  MessageSquare,
 } from "lucide-react";
 import { getSharedChat } from "@/lib/api";
 import { SharedSession, Source } from "@/lib/types";
@@ -141,8 +143,13 @@ export default function SharedChatPage() {
   const [session, setSession] = useState<SharedSession | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
+  const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
   const [expandedSources, setExpandedSources] = useState<Record<string, boolean>>({});
+
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const [showScrollTop, setShowScrollTop] = useState(false);
+  const [showScrollBottom, setShowScrollBottom] = useState(false);
 
   useEffect(() => {
     if (!shareToken) {
@@ -177,11 +184,39 @@ export default function SharedChatPage() {
     };
   }, [shareToken]);
 
+  const handleScroll = useCallback(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const top = el.scrollTop;
+    const bottomDist = el.scrollHeight - el.scrollTop - el.clientHeight;
+    setShowScrollTop(top > 250);
+    setShowScrollBottom(bottomDist > 250);
+  }, []);
+
+  const scrollToTop = () => {
+    scrollContainerRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const scrollToBottom = () => {
+    if (!scrollContainerRef.current) return;
+    scrollContainerRef.current.scrollTo({
+      top: scrollContainerRef.current.scrollHeight,
+      behavior: "smooth",
+    });
+  };
+
   const handleCopyLink = () => {
     if (typeof window === "undefined") return;
     navigator.clipboard.writeText(window.location.href);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2200);
+    setCopiedLink(true);
+    setTimeout(() => setCopiedLink(false), 2200);
+  };
+
+  const handleCopyMessage = (msgId: string, text: string) => {
+    if (typeof window === "undefined") return;
+    navigator.clipboard.writeText(text);
+    setCopiedMsgId(msgId);
+    setTimeout(() => setCopiedMsgId(null), 2000);
   };
 
   const toggleSourceExpansion = (messageId: string) => {
@@ -195,8 +230,12 @@ export default function SharedChatPage() {
   if (isLoading) {
     return (
       <div
+        className="shared-chat-page"
         style={{
-          minHeight: "100vh",
+          height: "100vh",
+          height: "100dvh",
+          width: "100%",
+          overflowY: "auto",
           background: "#08080A",
           color: "#FFFFFF",
           display: "flex",
@@ -229,8 +268,12 @@ export default function SharedChatPage() {
   if (error || !session) {
     return (
       <div
+        className="shared-chat-page"
         style={{
-          minHeight: "100vh",
+          height: "100vh",
+          height: "100dvh",
+          width: "100%",
+          overflowY: "auto",
           background: "#08080A",
           color: "#FFFFFF",
           display: "flex",
@@ -306,13 +349,23 @@ export default function SharedChatPage() {
 
   return (
     <div
+      ref={scrollContainerRef}
+      onScroll={handleScroll}
+      className="shared-chat-page"
       style={{
-        minHeight: "100vh",
+        height: "100vh",
+        height: "100dvh",
+        width: "100%",
+        overflowY: "auto",
+        overflowX: "hidden",
         background: "#08080A",
         color: "#FFFFFF",
         fontFamily: "var(--font-inter, sans-serif)",
         display: "flex",
         flexDirection: "column",
+        WebkitOverflowScrolling: "touch",
+        overscrollBehaviorY: "contain",
+        position: "relative",
       }}
     >
       {/* ── Top Navigation Bar ────────────────────────────────────────────── */}
@@ -321,17 +374,20 @@ export default function SharedChatPage() {
           position: "sticky",
           top: 0,
           zIndex: 40,
-          background: "rgba(8, 8, 10, 0.85)",
-          backdropFilter: "blur(16px)",
-          borderBottom: "1px solid rgba(255, 255, 255, 0.08)",
+          background: "rgba(8, 8, 10, 0.88)",
+          backdropFilter: "blur(20px)",
+          WebkitBackdropFilter: "blur(20px)",
+          borderBottom: "1px solid rgba(255, 255, 255, 0.09)",
           padding: "12px 24px",
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
           gap: 16,
+          flexShrink: 0,
+          boxShadow: "0 4px 20px rgba(0, 0, 0, 0.5)",
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
           <Link
             href="/"
             style={{
@@ -340,6 +396,7 @@ export default function SharedChatPage() {
               gap: 8,
               textDecoration: "none",
               color: "#FFFFFF",
+              flexShrink: 0,
             }}
           >
             <div
@@ -372,6 +429,7 @@ export default function SharedChatPage() {
               fontSize: 11,
               color: "rgba(255, 255, 255, 0.8)",
               fontWeight: 500,
+              whiteSpace: "nowrap",
             }}
           >
             <Globe size={11} color="#38BDF8" />
@@ -379,7 +437,7 @@ export default function SharedChatPage() {
           </div>
         </div>
 
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
           <motion.button
             onClick={handleCopyLink}
             whileHover={{ scale: 1.04 }}
@@ -398,7 +456,7 @@ export default function SharedChatPage() {
               cursor: "pointer",
             }}
           >
-            {copied ? (
+            {copiedLink ? (
               <>
                 <Check size={13} color="#22C55E" />
                 <span style={{ color: "#22C55E" }}>Link Copied</span>
@@ -425,6 +483,7 @@ export default function SharedChatPage() {
               fontWeight: 700,
               textDecoration: "none",
               boxShadow: "0 2px 10px rgba(255, 255, 255, 0.15)",
+              whiteSpace: "nowrap",
             }}
           >
             <span>Start Your Own Chat</span>
@@ -437,10 +496,10 @@ export default function SharedChatPage() {
       <main
         style={{
           flex: 1,
-          maxWidth: 880,
+          maxWidth: 900,
           width: "100%",
           margin: "0 auto",
-          padding: "32px 20px 60px",
+          padding: "32px 20px 80px",
           display: "flex",
           flexDirection: "column",
           gap: 24,
@@ -467,6 +526,7 @@ export default function SharedChatPage() {
                 letterSpacing: "-0.02em",
                 margin: "0 0 8px 0",
                 color: "#FFFFFF",
+                wordBreak: "break-word",
               }}
             >
               {session.title || "Untitled Conversation"}
@@ -486,7 +546,10 @@ export default function SharedChatPage() {
                 Shared: {formattedSharedAt}
               </span>
               <span>•</span>
-              <span>{session.messages.length} messages</span>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                <MessageSquare size={12} />
+                {session.messages.length} {session.messages.length === 1 ? "message" : "messages"}
+              </span>
               {session.documents && session.documents.length > 0 && (
                 <>
                   <span>•</span>
@@ -565,7 +628,7 @@ export default function SharedChatPage() {
         </section>
 
         {/* ── Conversation Messages List ──────────────────────────────────── */}
-        <section style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+        <section style={{ display: "flex", flexDirection: "column", gap: 24 }}>
           {session.messages.length === 0 ? (
             <div
               style={{
@@ -573,6 +636,9 @@ export default function SharedChatPage() {
                 textAlign: "center",
                 color: "rgba(255, 255, 255, 0.4)",
                 fontSize: 13,
+                background: "#0D0D10",
+                borderRadius: 12,
+                border: "1px solid rgba(255, 255, 255, 0.06)",
               }}
             >
               No messages found in this shared conversation.
@@ -585,6 +651,7 @@ export default function SharedChatPage() {
                 : "";
               const hasSources = !isUser && msg.sources && msg.sources.length > 0;
               const isSourcesExpanded = Boolean(expandedSources[msg.id]);
+              const isCopied = copiedMsgId === msg.id;
 
               return (
                 <div
@@ -594,6 +661,7 @@ export default function SharedChatPage() {
                     flexDirection: "column",
                     alignItems: isUser ? "flex-end" : "flex-start",
                     gap: 6,
+                    width: "100%",
                   }}
                 >
                   {/* Sender Header */}
@@ -601,20 +669,57 @@ export default function SharedChatPage() {
                     style={{
                       display: "flex",
                       alignItems: "center",
+                      justifyContent: isUser ? "flex-end" : "space-between",
+                      width: isUser ? "auto" : "100%",
                       gap: 8,
                       fontSize: 11,
                       color: "rgba(255, 255, 255, 0.4)",
                       padding: "0 4px",
                     }}
                   >
-                    <span style={{ fontWeight: 600, color: isUser ? "#E5E5E5" : "#FFFFFF" }}>
-                      {isUser ? "User" : "DocMind AI"}
-                    </span>
-                    {timeStr && <span>{timeStr}</span>}
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontWeight: 600, color: isUser ? "#E5E5E5" : "#FFFFFF" }}>
+                        {isUser ? "User" : "DocMind AI"}
+                      </span>
+                      {timeStr && <span>{timeStr}</span>}
+                    </div>
+
+                    {/* 1-Click Copy Message Button */}
+                    <button
+                      type="button"
+                      onClick={() => handleCopyMessage(msg.id || String(idx), msg.content)}
+                      title="Copy message content"
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 4,
+                        background: "transparent",
+                        border: "none",
+                        color: isCopied ? "#22C55E" : "rgba(255, 255, 255, 0.35)",
+                        fontSize: 10.5,
+                        cursor: "pointer",
+                        padding: "2px 6px",
+                        borderRadius: 4,
+                        transition: "color 0.15s ease",
+                      }}
+                    >
+                      {isCopied ? (
+                        <>
+                          <Check size={11} color="#22C55E" />
+                          <span style={{ color: "#22C55E" }}>Copied</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy size={11} />
+                          <span>Copy</span>
+                        </>
+                      )}
+                    </button>
                   </div>
 
                   {/* Bubble */}
                   <div
+                    className="message-bubble"
                     style={{
                       maxWidth: "100%",
                       width: isUser ? "auto" : "100%",
@@ -626,8 +731,10 @@ export default function SharedChatPage() {
                       padding: isUser ? "12px 18px" : "18px 24px",
                       color: "#FFFFFF",
                       fontSize: 13.5,
-                      lineHeight: 1.6,
+                      lineHeight: 1.65,
                       boxShadow: "0 4px 20px rgba(0, 0, 0, 0.5)",
+                      wordBreak: "break-word",
+                      overflowWrap: "break-word",
                     }}
                   >
                     {isUser ? (
@@ -749,8 +856,8 @@ export default function SharedChatPage() {
         {/* ── Footer Call to Action ────────────────────────────────────────── */}
         <section
           style={{
-            marginTop: 20,
-            padding: "24px 28px",
+            marginTop: 24,
+            padding: "28px 28px",
             background: "linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, rgba(255, 255, 255, 0.01) 100%)",
             border: "1px solid rgba(255, 255, 255, 0.08)",
             borderRadius: 14,
@@ -758,32 +865,33 @@ export default function SharedChatPage() {
             flexDirection: "column",
             alignItems: "center",
             textAlign: "center",
-            gap: 12,
+            gap: 14,
           }}
         >
           <div
             style={{
-              width: 40,
-              height: 40,
+              width: 44,
+              height: 44,
               borderRadius: "50%",
               background: "#FFFFFF",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
+              boxShadow: "0 4px 16px rgba(255, 255, 255, 0.2)",
             }}
           >
-            <Sparkles size={20} color="#000000" />
+            <Sparkles size={22} color="#000000" />
           </div>
-          <h3 style={{ fontSize: 16, fontWeight: 700, margin: 0, color: "#FFFFFF" }}>
+          <h3 style={{ fontSize: 17, fontWeight: 700, margin: 0, color: "#FFFFFF" }}>
             Experience Neural Document Intelligence with DocMind AI
           </h3>
           <p
             style={{
-              fontSize: 12.5,
+              fontSize: 13,
               color: "rgba(255, 255, 255, 0.6)",
-              maxWidth: 520,
+              maxWidth: 540,
               margin: 0,
-              lineHeight: 1.5,
+              lineHeight: 1.6,
             }}
           >
             Upload your own PDF, DOCX, CSV, or web pages and ask complex questions grounded with hybrid
@@ -792,17 +900,19 @@ export default function SharedChatPage() {
           <Link
             href="/"
             style={{
-              marginTop: 4,
+              marginTop: 6,
               display: "inline-flex",
               alignItems: "center",
               gap: 8,
-              padding: "9px 20px",
+              padding: "10px 22px",
               background: "#FFFFFF",
               color: "#000000",
               borderRadius: 8,
               fontSize: 13,
               fontWeight: 700,
               textDecoration: "none",
+              boxShadow: "0 4px 16px rgba(255, 255, 255, 0.2)",
+              transition: "transform 0.15s ease",
             }}
           >
             <span>Get Started for Free</span>
@@ -810,6 +920,79 @@ export default function SharedChatPage() {
           </Link>
         </section>
       </main>
+
+      {/* ── Floating Quick Scroll Buttons ─────────────────────────────────── */}
+      <div
+        style={{
+          position: "fixed",
+          bottom: 24,
+          right: 24,
+          display: "flex",
+          flexDirection: "column",
+          gap: 8,
+          zIndex: 50,
+        }}
+      >
+        <AnimatePresence>
+          {showScrollTop && (
+            <motion.button
+              initial={{ opacity: 0, scale: 0.8, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.8, y: 10 }}
+              whileHover={{ scale: 1.1 }}
+              whileTap={{ scale: 0.92 }}
+              onClick={scrollToTop}
+              title="Scroll to top of shared conversation"
+              style={{
+                width: 38,
+                height: 38,
+                borderRadius: "50%",
+                background: "rgba(18, 18, 22, 0.92)",
+                border: "1px solid rgba(255, 255, 255, 0.2)",
+                color: "#FFFFFF",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                cursor: "pointer",
+                boxShadow: "0 4px 20px rgba(0, 0, 0, 0.6)",
+                backdropFilter: "blur(10px)",
+              }}
+            >
+              <ArrowUp size={16} strokeWidth={2.5} />
+            </motion.button>
+          )}
+        </AnimatePresence>
+
+        <AnimatePresence>
+          {showScrollBottom && (
+            <motion.button
+              initial={{ opacity: 0, scale: 0.8, y: -10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.8, y: -10 }}
+              whileHover={{ scale: 1.1 }}
+              whileTap={{ scale: 0.92 }}
+              onClick={scrollToBottom}
+              title="Scroll to latest chats at the bottom"
+              style={{
+                width: 38,
+                height: 38,
+                borderRadius: "50%",
+                background: "rgba(18, 18, 22, 0.92)",
+                border: "1px solid rgba(255, 255, 255, 0.2)",
+                color: "#FFFFFF",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                cursor: "pointer",
+                boxShadow: "0 4px 20px rgba(0, 0, 0, 0.6)",
+                backdropFilter: "blur(10px)",
+              }}
+            >
+              <ArrowDown size={16} strokeWidth={2.5} />
+            </motion.button>
+          )}
+        </AnimatePresence>
+      </div>
     </div>
   );
 }
