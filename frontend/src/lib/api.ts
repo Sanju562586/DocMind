@@ -7,25 +7,9 @@ const API_BASE = process.env.NEXT_PUBLIC_DIRECT_API === "true" && process.env.NE
   : "/api/backend";
 
 function getUserHeaders(): Record<string, string> {
-  if (typeof document === "undefined") return {};
+  if (typeof window === "undefined") return {};
   try {
-    // 1. Try cookie first
-    const value = `; ${document.cookie}`;
-    const parts = value.split(`; docmind_user=`);
-    if (parts.length === 2) {
-      const val = parts.pop()?.split(";").shift();
-      if (val) {
-        const user = JSON.parse(decodeURIComponent(val));
-        if (user && user.id) {
-          return {
-            "X-User-Id": user.id,
-            "X-User-Email": user.email || "guest@docmind.local",
-            "X-User-Name": user.name || "Guest User",
-          };
-        }
-      }
-    }
-    // 2. Fallback to localStorage (especially for mobile browsers or when cookies are partitioned)
+    // 1. Try localStorage first (fast, strictly persistent, avoids cookie loss/expiration)
     if (typeof localStorage !== "undefined") {
       const ls = localStorage.getItem("docmind_user");
       if (ls) {
@@ -36,6 +20,24 @@ function getUserHeaders(): Record<string, string> {
             "X-User-Email": user.email || "guest@docmind.local",
             "X-User-Name": user.name || "Guest User",
           };
+        }
+      }
+    }
+    // 2. Try cookie fallback
+    if (typeof document !== "undefined") {
+      const cookies = document.cookie.split(";");
+      for (let c of cookies) {
+        c = c.trim();
+        if (c.startsWith("docmind_user=")) {
+          const val = c.substring("docmind_user=".length);
+          const user = JSON.parse(decodeURIComponent(val));
+          if (user && user.id) {
+            return {
+              "X-User-Id": user.id,
+              "X-User-Email": user.email || "guest@docmind.local",
+              "X-User-Name": user.name || "Guest User",
+            };
+          }
         }
       }
     }
@@ -265,11 +267,87 @@ export async function createSession(title: string = "New Conversation"): Promise
   }
 }
 
+// LocalStorage caching helpers for permanent cross-session & restart recovery
+const SESSIONS_CACHE_KEY = "docmind_persistent_sessions_v1";
+const MESSAGES_CACHE_PREFIX = "docmind_cached_msgs_";
+
+function getLocalCachedSessions(): Session[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = localStorage.getItem(SESSIONS_CACHE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function setLocalCachedSessions(sessions: Session[]): void {
+  if (typeof window === "undefined" || !Array.isArray(sessions)) return;
+  try {
+    localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify(sessions));
+  } catch {}
+}
+
+function getLocalCachedMessages(sessionId: string): Message[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = localStorage.getItem(`${MESSAGES_CACHE_PREFIX}${sessionId}`);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function setLocalCachedMessages(sessionId: string, msgs: Message[]): void {
+  if (typeof window === "undefined" || !Array.isArray(msgs)) return;
+  try {
+    localStorage.setItem(`${MESSAGES_CACHE_PREFIX}${sessionId}`, JSON.stringify(msgs));
+  } catch {}
+}
+
+export async function restoreSessionsToBackend(sessions: any[]): Promise<void> {
+  if (!sessions || sessions.length === 0) return;
+  try {
+    await fetchWithRetry(`${API_BASE}/sessions/restore`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessions }),
+    });
+  } catch (err) {
+    console.warn("Session auto-restoration notice:", err);
+  }
+}
+
 export async function listSessions(): Promise<Session[]> {
   try {
     const res = await fetchWithRetry(`${API_BASE}/sessions`, { cache: "no-store" });
-    return await handleResponse<Session[]>(res, "Failed to fetch sessions");
+    const remoteSessions = await handleResponse<Session[]>(res, "Failed to fetch sessions");
+
+    // If remote returned valid sessions, update local backup cache
+    if (Array.isArray(remoteSessions) && remoteSessions.length > 0) {
+      setLocalCachedSessions(remoteSessions);
+      return remoteSessions;
+    }
+
+    // If remote returned empty (e.g. cloud spin-down / ephemeral container restart or database reset),
+    // check if we have local cached sessions to restore!
+    const cached = getLocalCachedSessions();
+    if (cached.length > 0) {
+      const sessionsWithMsgs = cached.map((s) => ({
+        ...s,
+        messages: getLocalCachedMessages(s.id),
+      }));
+      restoreSessionsToBackend(sessionsWithMsgs).catch(() => {});
+      return cached;
+    }
+
+    return remoteSessions || [];
   } catch (err) {
+    // If backend is offline / unreachable, fallback seamlessly to local browser cache
+    const cached = getLocalCachedSessions();
+    if (cached.length > 0) {
+      return cached;
+    }
     throw new Error(parseErrorMessage(err, "Failed to fetch sessions"));
   }
 }
@@ -279,6 +357,9 @@ export async function getSession(sessionId: string): Promise<Session> {
     const res = await fetchWithRetry(`${API_BASE}/sessions/${sessionId}`);
     return await handleResponse<Session>(res, "Failed to fetch session");
   } catch (err) {
+    // Fallback to cached session metadata if server unavailable
+    const cached = getLocalCachedSessions().find((s) => s.id === sessionId);
+    if (cached) return cached;
     throw new Error(parseErrorMessage(err, "Failed to fetch session"));
   }
 }
@@ -287,16 +368,28 @@ export async function deleteSession(sessionId: string): Promise<void> {
   try {
     const res = await fetchWithRetry(`${API_BASE}/sessions/${sessionId}`, { method: "DELETE" });
     await handleResponse<{ status: string }>(res, "Failed to delete session");
-  } catch (err) {
-    throw new Error(parseErrorMessage(err, "Failed to delete session"));
+  } finally {
+    const cached = getLocalCachedSessions().filter((s) => s.id !== sessionId);
+    setLocalCachedSessions(cached);
+    try {
+      localStorage.removeItem(`${MESSAGES_CACHE_PREFIX}${sessionId}`);
+    } catch {}
   }
 }
 
 export async function getMessages(sessionId: string): Promise<Message[]> {
   try {
     const res = await fetchWithRetry(`${API_BASE}/sessions/${sessionId}/messages`);
-    return await handleResponse<Message[]>(res, "Failed to fetch messages");
+    const msgs = await handleResponse<Message[]>(res, "Failed to fetch messages");
+    if (Array.isArray(msgs) && msgs.length > 0) {
+      setLocalCachedMessages(sessionId, msgs);
+    }
+    return msgs;
   } catch (err) {
+    const cached = getLocalCachedMessages(sessionId);
+    if (cached.length > 0) {
+      return cached;
+    }
     throw new Error(parseErrorMessage(err, "Failed to fetch messages"));
   }
 }
@@ -318,6 +411,9 @@ export async function renameSession(sessionId: string, title: string): Promise<s
       body: JSON.stringify({ title }),
     });
     const data = await handleResponse<{ session_id: string; title: string }>(res, "Failed to rename session");
+    // Update local cache
+    const cached = getLocalCachedSessions().map((s) => (s.id === sessionId ? { ...s, title } : s));
+    setLocalCachedSessions(cached);
     return data.title;
   } catch (err) {
     throw new Error(parseErrorMessage(err, "Failed to rename session"));
@@ -328,8 +424,10 @@ export async function deleteAllSessions(): Promise<void> {
   try {
     const res = await fetchWithRetry(`${API_BASE}/sessions`, { method: "DELETE" });
     await handleResponse<{ status: string }>(res, "Failed to delete all sessions");
-  } catch (err) {
-    throw new Error(parseErrorMessage(err, "Failed to delete all sessions"));
+  } finally {
+    try {
+      localStorage.removeItem(SESSIONS_CACHE_KEY);
+    } catch {}
   }
 }
 

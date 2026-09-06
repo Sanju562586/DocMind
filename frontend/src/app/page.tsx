@@ -450,14 +450,21 @@ export default function HomePage() {
       const sessList = await listSessions();
       setSessions(sessList);
       setBackendStatus("healthy");
-      if (autoRestoreLast && user?.id && typeof window !== "undefined") {
+      if (autoRestoreLast && typeof window !== "undefined") {
         try {
-          const lastId = localStorage.getItem(`docmind_last_session_${user.id}`);
+          const lastId =
+            (user?.id ? localStorage.getItem(`docmind_last_session_${user.id}`) : null) ||
+            localStorage.getItem("docmind_last_session");
           if (lastId) {
             const target = sessList.find((s) => s.id === lastId);
             if (target) {
               handleSelectSession(target);
+              return;
             }
+          }
+          // Auto-select most recent active conversation if none chosen
+          if (!activeSession && sessList.length > 0) {
+            handleSelectSession(sessList[0]);
           }
         } catch {}
       }
@@ -505,9 +512,10 @@ export default function HomePage() {
   // ── Select a session ────────────────────────────────────────────────────────
   const handleSelectSession = useCallback(async (session: Session) => {
     setActiveSession(session);
-    if (user?.id && typeof window !== "undefined") {
+    if (typeof window !== "undefined") {
       try {
-        localStorage.setItem(`docmind_last_session_${user.id}`, session.id);
+        if (user?.id) localStorage.setItem(`docmind_last_session_${user.id}`, session.id);
+        localStorage.setItem("docmind_last_session", session.id);
       } catch {}
     }
     setIsLoadingMessages(true);
@@ -533,9 +541,10 @@ export default function HomePage() {
   const handleNewChat = async () => {
     try {
       const newId = await createSession("New Conversation");
-      if (user?.id && typeof window !== "undefined") {
+      if (typeof window !== "undefined") {
         try {
-          localStorage.setItem(`docmind_last_session_${user.id}`, newId);
+          if (user?.id) localStorage.setItem(`docmind_last_session_${user.id}`, newId);
+          localStorage.setItem("docmind_last_session", newId);
         } catch {}
       }
       const updatedList = await listSessions();

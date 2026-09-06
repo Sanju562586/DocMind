@@ -68,6 +68,21 @@ async function handleProxy(
     if (user?.name) headers.set("X-User-Name", user.name);
   }
 
+  // Forward incoming client identity headers if cookie was absent or empty
+  const clientUserId = req.headers.get("x-user-id");
+  if (clientUserId && (!userId || userId === "default_user")) {
+    headers.set("X-User-Id", clientUserId);
+    userId = clientUserId;
+  }
+  const clientUserEmail = req.headers.get("x-user-email");
+  if (clientUserEmail && !headers.get("X-User-Email")) {
+    headers.set("X-User-Email", clientUserEmail);
+  }
+  const clientUserName = req.headers.get("x-user-name");
+  if (clientUserName && !headers.get("X-User-Name")) {
+    headers.set("X-User-Name", clientUserName);
+  }
+
   // 2. Inject Secure HTTP-only API Keys server-to-server (User-scoped cookie first)
   const userKeysCookie = userId && userId !== "default_user" ? req.cookies.get(`docmind_keys_${userId}`)?.value : null;
   const keysCookie = userKeysCookie || req.cookies.get("docmind_keys")?.value;

@@ -71,11 +71,17 @@ function deleteCookie(name: string) {
 
 function getCookie(name: string): string | null {
   if (typeof document === "undefined") return null;
-  const value = `; ${document.cookie}`;
-  const parts = value.split(`; ${name}=`);
-  if (parts.length === 2) {
-    const val = parts.pop()?.split(";").shift();
-    return val ? decodeURIComponent(val) : null;
+  const cookies = document.cookie.split(";");
+  for (let c of cookies) {
+    c = c.trim();
+    if (c.startsWith(`${name}=`)) {
+      const val = c.substring(name.length + 1);
+      try {
+        return decodeURIComponent(val);
+      } catch {
+        return val;
+      }
+    }
   }
   return null;
 }
@@ -105,21 +111,21 @@ function clearUserStorage() {
 
 function loadSavedUser(): User | null {
   if (typeof window === "undefined") return null;
-  // 1. Try cookie
+  // 1. Try localStorage first (resilient across tabs and unaffected by cookie policies)
   try {
-    const savedCookie = getCookie("docmind_user");
-    if (savedCookie) {
-      const parsed = JSON.parse(savedCookie);
+    const ls = localStorage.getItem("docmind_user");
+    if (ls) {
+      const parsed = JSON.parse(ls);
       if (parsed && parsed.id) return parsed;
     }
   } catch {
     // ignore
   }
-  // 2. Try localStorage fallback
+  // 2. Try cookie fallback
   try {
-    const ls = localStorage.getItem("docmind_user");
-    if (ls) {
-      const parsed = JSON.parse(ls);
+    const savedCookie = getCookie("docmind_user");
+    if (savedCookie) {
+      const parsed = JSON.parse(savedCookie);
       if (parsed && parsed.id) return parsed;
     }
   } catch {

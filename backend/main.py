@@ -562,6 +562,21 @@ async def list_sessions(request: Request):
     return store.list_sessions(user_id=user["user_id"])
 
 
+@app.post("/api/sessions/restore")
+async def restore_sessions(request: Request):
+    """Re-hydrate conversations from browser persistent client storage into database."""
+    user = _get_user_info(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    sessions_data = body.get("sessions") or []
+    if not store:
+        raise HTTPException(status_code=503, detail="Storage backend not initialized")
+    res = store.restore_session_data(sessions_data, user_id=user["user_id"])
+    return {"status": "success", **res}
+
+
 @app.delete("/api/sessions")
 async def delete_all_sessions(request: Request):
     """Clear all sessions, documents, and indexes for the authenticated user."""

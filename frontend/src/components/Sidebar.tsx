@@ -21,6 +21,7 @@ import {
   Pin,
   PinOff,
   Tag,
+  Globe,
 } from "lucide-react";
 import { format, isToday, isYesterday, parseISO } from "date-fns";
 import { motion, AnimatePresence } from "framer-motion";
@@ -642,11 +643,51 @@ export default function Sidebar({
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
-                fontSize: 14,
+                fontSize: 13,
                 flexShrink: 0,
+                overflow: "hidden",
+                position: "relative",
               }}
             >
-              {user?.image || "👤"}
+              {typeof user?.image === "string" &&
+              (user.image.startsWith("http://") ||
+                user.image.startsWith("https://") ||
+                user.image.startsWith("data:") ||
+                user.image.startsWith("/")) ? (
+                <img
+                  src={user.image}
+                  alt={user?.name || "User"}
+                  referrerPolicy="no-referrer"
+                  onError={(e) => {
+                    (e.target as HTMLElement).style.display = "none";
+                  }}
+                  style={{
+                    width: "100%",
+                    height: "100%",
+                    objectFit: "cover",
+                    borderRadius: "50%",
+                    display: "block",
+                  }}
+                />
+              ) : user?.image === "🌐" ? (
+                <Globe size={13} color="#60a5fa" />
+              ) : typeof user?.image === "string" && user.image.length <= 4 ? (
+                <span style={{ fontSize: 13, lineHeight: 1, userSelect: "none" }}>{user.image}</span>
+              ) : user?.name && user.name.trim().length > 0 ? (
+                <span
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 600,
+                    color: "#fff",
+                    textTransform: "uppercase",
+                    userSelect: "none",
+                  }}
+                >
+                  {user.name.trim().charAt(0)}
+                </span>
+              ) : (
+                <span style={{ fontSize: 13, lineHeight: 1, userSelect: "none" }}>👤</span>
+              )}
             </div>
             <div style={{ overflow: "hidden", textAlign: "left" }}>
               <div style={{ fontSize: 11, fontWeight: 600, color: "#fff", whiteSpace: "nowrap", textOverflow: "ellipsis", overflow: "hidden" }}>

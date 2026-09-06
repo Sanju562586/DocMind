@@ -18,6 +18,63 @@ import {
 } from "lucide-react";
 import { useAuth, DEMO_PROFILES } from "@/lib/auth";
 
+function UserAvatar({ user, size = 38, fontSize = 18 }: { user: any; size?: number; fontSize?: number }) {
+  const [imgError, setImgError] = useState(false);
+  const imageUrl = user?.image;
+  const isUrl =
+    typeof imageUrl === "string" &&
+    (imageUrl.startsWith("http://") ||
+      imageUrl.startsWith("https://") ||
+      imageUrl.startsWith("data:") ||
+      imageUrl.startsWith("/"));
+
+  if (isUrl && !imgError) {
+    return (
+      <img
+        src={imageUrl}
+        alt={user?.name || "User"}
+        referrerPolicy="no-referrer"
+        onError={() => setImgError(true)}
+        style={{
+          width: "100%",
+          height: "100%",
+          objectFit: "cover",
+          borderRadius: "50%",
+          display: "block",
+        }}
+      />
+    );
+  }
+
+  if (imageUrl === "🌐") {
+    return <Globe size={Math.round(size * 0.55)} color="#60a5fa" />;
+  }
+
+  // Short emoji or icon character
+  if (typeof imageUrl === "string" && imageUrl.length <= 4) {
+    return <span style={{ fontSize, lineHeight: 1, userSelect: "none" }}>{imageUrl}</span>;
+  }
+
+  // Initial of name fallback
+  if (user?.name && typeof user.name === "string" && user.name.trim().length > 0) {
+    return (
+      <span
+        style={{
+          fontSize: Math.round(size * 0.42),
+          fontWeight: 600,
+          color: "#fff",
+          textTransform: "uppercase",
+          userSelect: "none",
+        }}
+      >
+        {user.name.trim().charAt(0)}
+      </span>
+    );
+  }
+
+  return <span style={{ fontSize, lineHeight: 1, userSelect: "none" }}>👤</span>;
+}
+
 export function AuthModal() {
   const {
     user,
@@ -127,9 +184,11 @@ export function AuthModal() {
                   justifyContent: "center",
                   border: "1px solid rgba(99, 102, 241, 0.3)",
                   flexShrink: 0,
+                  overflow: "hidden",
+                  position: "relative",
                 }}
               >
-                {user?.image === "🌐" ? <Globe size={20} color="#60a5fa" /> : user?.image || "👤"}
+                <UserAvatar user={user} size={38} fontSize={18} />
               </div>
               <div>
                 <div style={{ fontSize: 14, fontWeight: 600, color: "#fff" }}>
