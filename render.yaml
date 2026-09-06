@@ -15,7 +15,7 @@ services:
       - key: ALLOWED_ORIGINS
         value: https://*.vercel.app,http://localhost:3000,http://127.0.0.1:3000
       - key: ENABLE_NEURAL_MODELS
-        value: "true"
+        value: "false"
       - key: OMP_NUM_THREADS
         value: "1"
       - key: MKL_NUM_THREADS

@@ -2,7 +2,7 @@
 
 import { ApiKeys, Document, Message, Session, Source, MemoryItem, SystemStats, KeyStatus, HealthStatus, SharedSession } from "./types";
 
-const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL
+const API_BASE = process.env.NEXT_PUBLIC_DIRECT_API === "true" && process.env.NEXT_PUBLIC_BACKEND_URL
   ? `${process.env.NEXT_PUBLIC_BACKEND_URL.replace(/\/+$/, "").replace(/\/api$/, "")}/api`
   : "/api/backend";
 

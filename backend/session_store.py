@@ -398,6 +398,16 @@ class SessionStore:
             )
         return session_id
 
+    def ensure_session(self, session_id: str, title: str = "New Conversation", user_id: str = "default_user") -> None:
+        """Create session if it does not exist already (idempotent recovery after restarts)."""
+        with self._conn() as conn:
+            existing = conn.execute("SELECT id FROM sessions WHERE id = ?", (session_id,)).fetchone()
+            if not existing:
+                conn.execute(
+                    "INSERT INTO sessions (id, user_id, title) VALUES (?, ?, ?)",
+                    (session_id, user_id or "default_user", title),
+                )
+
     def get_session(self, session_id: str, user_id: Optional[str] = None) -> Optional[Dict]:
         try:
             self.cleanup_stuck_documents(max_age_seconds=300)

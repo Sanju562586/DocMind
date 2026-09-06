@@ -537,7 +537,7 @@ async def get_messages(session_id: str, request: Request):
     user = _get_user_info(request)
     session = store.get_session(session_id, user_id=user["user_id"])
     if not session:
-        raise HTTPException(status_code=404, detail="Session not found or unauthorized")
+        return []
     return store.get_messages(session_id)
 
 
@@ -631,7 +631,9 @@ async def upload_document_to_session(
     user = _get_user_info(request)
     session = store.get_session(session_id, user_id=user["user_id"])
     if not session:
-        raise HTTPException(status_code=404, detail="Session not found or unauthorized")
+        # Idempotently recreate session so uploads never fail if server restarted
+        store.ensure_session(session_id, title="New Conversation", user_id=user["user_id"])
+        session = store.get_session(session_id, user_id=user["user_id"])
 
     # Read uploaded bytes with size bounds checking
     content = await file.read()
@@ -671,7 +673,7 @@ async def upload_document_to_session(
     )
 
     # Automatically update session title if default
-    if session["title"] in ("New Conversation", "New Chat") or len(session.get("documents", [])) == 0:
+    if session and (session.get("title") in ("New Conversation", "New Chat") or len(session.get("documents", [])) == 0):
         clean_title = clean_filename.rsplit(".", 1)[0].replace("_", " ").replace("-", " ")
         store.update_session_title(session_id, clean_title[:60], user_id=user["user_id"])
 
@@ -707,7 +709,7 @@ async def list_session_documents(session_id: str, request: Request):
     user = _get_user_info(request)
     session = store.get_session(session_id, user_id=user["user_id"])
     if not session:
-        raise HTTPException(status_code=404, detail="Session not found or unauthorized")
+        return []
     return store.list_session_documents(session_id)
 
 

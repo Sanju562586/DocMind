@@ -611,24 +611,24 @@ body {
   -webkit-backdrop-filter: blur(20px);
   flex-shrink: 0;
   z-index: 30;
-  gap: 8px;
+  gap: 12px;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
 }
 
 .topbar-left {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
-  flex: 1;
+  flex: 1 1 auto;
+  overflow: hidden;
 }
 
 .topbar-title-group {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-width: 0;
-  overflow: hidden;
+  flex-shrink: 0;
 }
 
 .topbar-title-input {
@@ -636,12 +636,12 @@ body {
   border: 1px solid rgba(255, 255, 255, 0.3);
   border-radius: var(--radius-xs);
   color: #FFFFFF;
-  font-size: 14px;
+  font-size: 13.5px;
   font-weight: 700;
   font-family: inherit;
   padding: 2px 8px;
   outline: none;
-  width: clamp(120px, 28vw, 300px);
+  width: clamp(100px, 18vw, 220px);
   letter-spacing: -0.01em;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
@@ -652,30 +652,186 @@ body {
 }
 
 .topbar-title {
-  font-size: 14px;
+  font-size: 13.5px;
   font-weight: 700;
   color: #FFFFFF;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: clamp(120px, 30vw, 320px);
+  max-width: clamp(90px, 16vw, 190px);
   letter-spacing: -0.01em;
 }
 
-.topbar-doc-pill {
+/* ── Inline Attached Documents in Topbar ─────────────────────────────────── */
+.topbar-docs-container {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  padding: 2px 0;
+}
+.topbar-docs-container::-webkit-scrollbar {
+  display: none;
+}
+
+.topbar-doc-chip {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   padding: 3px 8px;
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.25);
-  border-radius: var(--radius-full);
-  font-size: 10.5px;
-  font-weight: 600;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: var(--radius-sm);
+  font-size: 11.5px;
   color: #FFFFFF;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: var(--transition-fast);
+}
+
+.topbar-doc-chip:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.topbar-doc-chip-name {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.topbar-doc-chip-chunks {
+  font-size: 10px;
+  color: var(--text-muted-alt);
+}
+
+.topbar-doc-chip-badge {
+  font-size: 9.5px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.topbar-doc-chip-badge.processing {
+  background: rgba(255, 255, 255, 0.1);
+  color: #FFFFFF;
+}
+
+.topbar-doc-chip-badge.error {
+  background: rgba(255, 99, 71, 0.15);
+  color: #FFA07A;
+  cursor: pointer;
+}
+
+.topbar-doc-chip-del {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.4);
+  cursor: pointer;
+  margin-left: 2px;
+  transition: var(--transition-fast);
+}
+
+.topbar-doc-chip-del:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #FFFFFF;
+}
+
+.topbar-uploading-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  font-size: 10.5px;
+  color: #FFFFFF;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px dashed rgba(255, 255, 255, 0.2);
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
   flex-shrink: 0;
 }
 
+.topbar-add-doc-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  background: transparent;
+  border: 1px dashed rgba(255, 255, 255, 0.2);
+  border-radius: var(--radius-sm);
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: var(--transition-fast);
+}
+
+.topbar-add-doc-btn:hover {
+  border-color: rgba(255, 255, 255, 0.5);
+  color: #FFFFFF;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+/* ── Center: Memory Scope Segmented Control ───────────────────────────────── */
+.topbar-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.topbar-memory-toggle {
+  display: inline-flex;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-sm);
+  padding: 2px;
+  gap: 2px;
+}
+
+.topbar-memory-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: var(--radius-xs);
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+
+.topbar-memory-btn:hover:not(.active) {
+  color: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.topbar-memory-btn.active {
+  background: #FFFFFF;
+  color: #000000;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+
+/* ── Topbar Actions (Right) ───────────────────────────────────────────────── */
 .topbar-actions {
   display: flex;
   align-items: center;
@@ -751,7 +907,16 @@ body {
 /* ── Topbar Responsive Breakpoints ───────────────────────────────────────── */
 @media (max-width: 900px) {
   .topbar-title {
-    max-width: clamp(80px, 22vw, 220px);
+    max-width: clamp(80px, 14vw, 150px);
+  }
+  .topbar-memory-btn span {
+    display: none;
+  }
+  .topbar-memory-btn {
+    padding: 3px 6px;
+  }
+  .topbar-doc-chip-name {
+    max-width: 100px;
   }
 }
 
@@ -770,10 +935,19 @@ body {
     gap: 4px;
   }
   .topbar-title {
-    max-width: clamp(60px, 18vw, 180px);
+    max-width: clamp(60px, 14vw, 120px);
     font-size: 13px;
   }
-  .topbar-doc-pill {
+  .topbar-add-doc-btn span {
+    display: none;
+  }
+  .topbar-doc-chip-name {
+    max-width: 80px;
+  }
+}
+
+@media (max-width: 580px) {
+  .topbar-center {
     display: none;
   }
 }
@@ -784,16 +958,16 @@ body {
     height: 50px;
   }
   .topbar-icon-btn {
-    width: 36px;
-    height: 36px;
+    width: 34px;
+    height: 34px;
   }
   .topbar-action-btn {
-    padding: 7px 8px;
-    min-height: 36px;
+    padding: 6px 8px;
+    min-height: 34px;
   }
   .topbar-title {
-    font-size: 12.5px;
-    max-width: clamp(40px, 14vw, 140px);
+    font-size: 12px;
+    max-width: clamp(40px, 12vw, 100px);
   }
 }
 
@@ -804,8 +978,8 @@ body {
     gap: 4px;
   }
   .topbar-icon-btn {
-    width: 34px;
-    height: 34px;
+    width: 32px;
+    height: 32px;
   }
 }
 
@@ -1411,6 +1585,7 @@ body {
 }
 
 .input-container {
+  position: relative;
   max-width: 1060px;
   margin: 0 auto;
   display: flex;
@@ -2052,32 +2227,31 @@ body {
 
 /* ── Scroll-to-Bottom Floating Button ────────────────────────────────────── */
 .scroll-to-bottom-btn {
-  position: sticky;
-  bottom: 16px;
+  position: absolute;
+  top: -44px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 40;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
+  width: 32px;
+  height: 32px;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.15);
-  border: 1px solid rgba(255, 255, 255, 0.4);
+  background: #111111;
+  border: 1px solid rgba(255, 255, 255, 0.25);
   color: #FFFFFF;
-  font-size: 16px;
   cursor: pointer;
-  backdrop-filter: blur(12px);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.8), 0 0 10px rgba(255, 255, 255, 0.1);
-  transition: background 0.15s ease, box-shadow 0.15s ease;
-  align-self: flex-end;
-  margin-bottom: -16px;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.8), 0 0 1px rgba(255, 255, 255, 0.25);
+  transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .scroll-to-bottom-btn:hover {
-  background: rgba(255, 255, 255, 0.25);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.9), 0 0 14px rgba(255, 255, 255, 0.2);
+  background: #222222;
+  border-color: rgba(255, 255, 255, 0.6);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.95), 0 0 10px rgba(255, 255, 255, 0.25);
 }
 
 /* ── Utility Animations & Spinners ───────────────────────────────────────── */

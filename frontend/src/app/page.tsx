@@ -19,6 +19,7 @@ import {
   CheckCircle2,
   Paperclip,
   ArrowUp,
+  ArrowDown,
   Cpu,
   Download,
   Edit3,
@@ -1137,8 +1138,9 @@ export default function HomePage() {
               </motion.div>
             )}
           </AnimatePresence>
-          {/* Responsive Topbar Header */}
+          {/* Responsive Unified Topbar Header */}
           <header className="topbar">
+            {/* Left: Sidebar Toggle + Title + Inline Attached Documents & Add Doc */}
             <div className="topbar-left">
               <motion.button
                 className="topbar-icon-btn"
@@ -1176,44 +1178,127 @@ export default function HomePage() {
                     {hasSession ? activeSession.title : "DocMind AI"}
                   </motion.div>
                 )}
-                {hasSession && currentDocs.length > 0 && !isEditingTitle && (
-                  <span className="topbar-doc-pill">
-                    <FileText size={10.5} />
-                    <span>{currentDocs.length} {currentDocs.length === 1 ? "doc" : "docs"}</span>
-                  </span>
-                )}
               </div>
+
+              {/* Inline Attached Documents & Quick Add */}
+              {hasSession && (
+                <div className="topbar-docs-container">
+                  <AnimatePresence>
+                    {currentDocs.map((d, dIdx) => (
+                      <motion.div
+                        key={d.doc_id || `doc-chip-${dIdx}-${d.filename}`}
+                        layout
+                        initial={{ scale: 0.85, opacity: 0 }}
+                        animate={{ scale: 1, opacity: 1 }}
+                        exit={{ scale: 0.85, opacity: 0 }}
+                        className="topbar-doc-chip"
+                      >
+                        <FileText size={12} color="#FFFFFF" />
+                        <span className="topbar-doc-chip-name" title={d.filename}>
+                          {d.filename}
+                        </span>
+                        {d.status === "processing" ? (
+                          <span className="topbar-doc-chip-badge processing">
+                            <div className="spin" style={{ width: 8, height: 8, border: "1.2px solid #FFFFFF", borderTopColor: "transparent", borderRadius: "50%" }} />
+                            <span>Processing</span>
+                          </span>
+                        ) : d.status === "error" ? (
+                          <span
+                            className="topbar-doc-chip-badge error"
+                            title={d.error_message || "Processing failed. Click to retry."}
+                            onClick={() => handleRetryDocument(d.doc_id || (d as any).id)}
+                          >
+                            Failed
+                            {retryingDocId === (d.doc_id || (d as any).id) ? (
+                              <div className="spin" style={{ width: 7, height: 7, border: "1px solid #FFA07A", borderTopColor: "transparent", borderRadius: "50%" }} />
+                            ) : (
+                              <RefreshCw size={9} color="#FFA07A" />
+                            )}
+                          </span>
+                        ) : (
+                          <span className="topbar-doc-chip-chunks">
+                            ({d.chunk_count})
+                          </span>
+                        )}
+                        <motion.button
+                          className="topbar-doc-chip-del"
+                          onClick={() => handleDeleteDocument(d.doc_id)}
+                          disabled={deletingDocId === d.doc_id}
+                          title="Remove document from this chat"
+                          whileHover={{ scale: 1.2 }}
+                          whileTap={{ scale: 0.85 }}
+                        >
+                          {deletingDocId === d.doc_id ? (
+                            <div className="spin" style={{ width: 8, height: 8, border: "1px solid #FFFFFF", borderTopColor: "transparent", borderRadius: "50%" }} />
+                          ) : (
+                            <Trash2 size={11} color="#FFFFFF" />
+                          )}
+                        </motion.button>
+                      </motion.div>
+                    ))}
+                  </AnimatePresence>
+
+                  {isUploadingMidChat && (
+                    <div className="topbar-uploading-badge">
+                      <div className="spin" style={{ width: 10, height: 10, border: "1.5px solid #FFFFFF", borderTopColor: "transparent", borderRadius: "50%" }} />
+                      <span>Indexing…</span>
+                    </div>
+                  )}
+
+                  <motion.button
+                    className="topbar-add-doc-btn"
+                    onClick={handleOpenUploadModal}
+                    whileHover={{ scale: 1.04 }}
+                    whileTap={{ scale: 0.95 }}
+                    title="Add document to this chat"
+                  >
+                    <Plus size={11} />
+                    <span>Add Doc</span>
+                  </motion.button>
+                </div>
+              )}
             </div>
 
+            {/* Center: Memory Scope Segmented Control */}
+            {hasSession && (
+              <div className="topbar-center">
+                <div className="topbar-memory-toggle">
+                  <button
+                    type="button"
+                    className={`topbar-memory-btn ${useGlobalMemory ? "active" : ""}`}
+                    onClick={() => {
+                      setUseGlobalMemory(true);
+                      if (typeof window !== "undefined") {
+                        localStorage.setItem("docmind_use_global_memory", "true");
+                      }
+                      showToast("Global Knowledge active: searching all documents & past chats", "info");
+                    }}
+                    title="Global Knowledge: Searches across all uploaded documents and past conversation insights"
+                  >
+                    <Globe size={11.5} />
+                    <span>Global</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`topbar-memory-btn ${!useGlobalMemory ? "active" : ""}`}
+                    onClick={() => {
+                      setUseGlobalMemory(false);
+                      if (typeof window !== "undefined") {
+                        localStorage.setItem("docmind_use_global_memory", "false");
+                      }
+                      showToast("Current Chat active: querying only this conversation", "info");
+                    }}
+                    title="Current Chat Only: Queries strictly this conversation's documents & messages"
+                  >
+                    <FileText size={11.5} />
+                    <span>Current Chat</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Right: Actions */}
             <div className="topbar-actions">
-              <motion.button
-                className="topbar-action-btn"
-                onClick={() => setIsCommandPaletteOpen(true)}
-                whileHover={{ scale: 1.04 }}
-                whileTap={{ scale: 0.95 }}
-                title="Launch Command Palette (Cmd+K)"
-              >
-                <Search size={13} />
-                <span className="hide-on-tablet">Launch</span>
-                <kbd style={{ fontSize: 9, padding: "1px 4px", background: "rgba(255,255,255,0.1)", borderRadius: 3 }}>⌘K</kbd>
-              </motion.button>
-
-              {hasSession && messages.length > 0 && (
-                <motion.button
-                  className="topbar-icon-btn"
-                  onClick={() => {
-                    setIsChatSearchOpen((prev) => !prev);
-                    if (isChatSearchOpen) setChatSearchQuery("");
-                  }}
-                  whileHover={{ scale: 1.08 }}
-                  whileTap={{ scale: 0.92 }}
-                  title="Search conversation (Ctrl+F)"
-                  aria-label="Search conversation"
-                >
-                  <Search size={14} color={isChatSearchOpen ? "#60A5FA" : "#FFFFFF"} />
-                </motion.button>
-              )}
-
               {hasSession && currentDocs.length > 0 && (
                 <motion.button
                   className="topbar-action-btn summarize-btn"
@@ -1258,28 +1343,6 @@ export default function HomePage() {
                   <span className="hide-on-tablet">Share</span>
                 </motion.button>
               )}
-
-              <motion.button
-                className="topbar-action-btn"
-                onClick={() => setModal("pipeline")}
-                whileHover={{ scale: 1.04 }}
-                whileTap={{ scale: 0.95 }}
-                title="View AI Pipeline Architecture"
-              >
-                <Layers size={13.5} />
-                <span className="hide-on-tablet">Pipeline</span>
-              </motion.button>
-
-              <motion.button
-                className="topbar-action-btn"
-                onClick={() => setModal("memory")}
-                whileHover={{ scale: 1.04 }}
-                whileTap={{ scale: 0.95 }}
-                title="View Global Cross-Session Memory"
-              >
-                <Database size={13.5} />
-                <span className="hide-on-tablet">Memory</span>
-              </motion.button>
 
               <motion.button
                 className="topbar-icon-btn"
@@ -1362,90 +1425,6 @@ export default function HomePage() {
 
           {hasSession ? (
             <>
-              {/* Session Documents Context Header Strip */}
-              {currentDocs.length > 0 && (
-                <div className="context-strip">
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", flex: 1 }}>
-                    <span className="context-strip-label">
-                      Active Chat Context:
-                    </span>
-                    <AnimatePresence>
-                      {currentDocs.map((d, dIdx) => (
-                        <motion.div
-                          key={d.doc_id || `doc-chip-${dIdx}-${d.filename}`}
-                          layout
-                          initial={{ scale: 0.8, opacity: 0 }}
-                          animate={{ scale: 1, opacity: 1 }}
-                          exit={{ scale: 0.8, opacity: 0 }}
-                          whileHover={{ scale: 1.03, y: -1 }}
-                          transition={{ type: "spring", stiffness: 400, damping: 25 }}
-                          className="doc-chip"
-                        >
-                          <FileText size={13} color="#FFFFFF" />
-                          <span style={{ maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600 }}>
-                            {d.filename}
-                          </span>
-                          {d.status === "processing" ? (
-                            <span style={{ fontSize: 10, color: "#FFFFFF", display: "inline-flex", alignItems: "center", gap: 4, background: "rgba(255, 255, 255, 0.1)", padding: "1px 6px", borderRadius: 4 }}>
-                              <div className="spin" style={{ width: 8, height: 8, border: "1.2px solid #FFFFFF", borderTopColor: "transparent", borderRadius: "50%" }} />
-                              Processing…
-                            </span>
-                          ) : d.status === "error" ? (
-                            <span
-                              style={{ fontSize: 10, color: "#FFA07A", display: "inline-flex", alignItems: "center", gap: 4, background: "rgba(255, 99, 71, 0.15)", padding: "1px 6px", borderRadius: 4, cursor: "pointer" }}
-                              title={d.error_message || "Processing failed or timed out. Click refresh icon to retry."}
-                              onClick={() => handleRetryDocument(d.doc_id || (d as any).id)}
-                            >
-                              Failed
-                              <motion.span
-                                style={{ display: "inline-flex", alignItems: "center" }}
-                                title="Retry processing"
-                                whileHover={{ scale: 1.25 }}
-                                whileTap={{ scale: 0.85 }}
-                              >
-                                {retryingDocId === (d.doc_id || (d as any).id) ? (
-                                  <div className="spin" style={{ width: 7, height: 7, border: "1px solid #FFA07A", borderTopColor: "transparent", borderRadius: "50%" }} />
-                                ) : (
-                                  <RefreshCw size={9} color="#FFA07A" />
-                                )}
-                              </motion.span>
-                            </span>
-                          ) : (
-                            <span style={{ fontSize: 10, color: "var(--text-muted-alt)" }}>
-                              ({d.chunk_count} chunks)
-                            </span>
-                          )}
-                          <motion.button
-                            className="icon-btn"
-                            style={{ width: 18, height: 18, marginLeft: 2 }}
-                            onClick={() => handleDeleteDocument(d.doc_id)}
-                            disabled={deletingDocId === d.doc_id}
-                            title="Remove document from this chat"
-                            whileHover={{ scale: 1.25 }}
-                            whileTap={{ scale: 0.8 }}
-                          >
-                            {deletingDocId === d.doc_id ? (
-                              <div className="spin" style={{ width: 8, height: 8, border: "1px solid #FFFFFF", borderTopColor: "transparent", borderRadius: "50%" }} />
-                            ) : (
-                              <Trash2 size={11} color="#FFFFFF" />
-                            )}
-                          </motion.button>
-                        </motion.div>
-                      ))}
-                    </AnimatePresence>
-                  </div>
-
-                  <motion.button
-                    className="btn btn-outline"
-                    style={{ padding: "4px 10px", fontSize: 11 }}
-                    onClick={handleOpenUploadModal}
-                    whileHover={{ scale: 1.05 }}
-                    whileTap={{ scale: 0.95 }}
-                  >
-                    <Plus size={11} color="#FFFFFF" /> Add Document
-                  </motion.button>
-                </div>
-              )}
 
               {/* Chat Message Stream */}
               <div
@@ -1453,23 +1432,6 @@ export default function HomePage() {
                 className="chat-scrollable"
                 onScroll={handleChatScroll}
               >
-                {/* Scroll To Bottom Button */}
-                <AnimatePresence>
-                  {showScrollToBottom && (
-                    <motion.button
-                      initial={{ opacity: 0, scale: 0.85, y: 10 }}
-                      animate={{ opacity: 1, scale: 1, y: 0 }}
-                      exit={{ opacity: 0, scale: 0.85, y: 10 }}
-                      transition={{ type: "spring", stiffness: 400, damping: 25 }}
-                      onClick={scrollToBottom}
-                      className="scroll-to-bottom-btn"
-                      title="Scroll to bottom"
-                      aria-label="Scroll to latest message"
-                    >
-                      ↓
-                    </motion.button>
-                  )}
-                </AnimatePresence>
                 <div className="chat-container">
                   {currentDocs.length === 0 && messages.length === 0 && (
                     <motion.div
@@ -1596,105 +1558,28 @@ export default function HomePage() {
                 </div>
               </div>
 
-              {/* Chat Input Floating Command Bar */}
+              {/* Chat Input Command Bar */}
               <div className="input-area">
                 <div className="input-container">
-                  {/* Knowledge Scope Toggle Bar & Mid-Chat Upload Indicator */}
-                  <div
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "space-between",
-                      padding: "0 6px 8px",
-                      fontSize: 11,
-                    }}
-                  >
-                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                      <span style={{ color: "rgba(255, 255, 255, 0.4)", fontWeight: 500 }}>
-                        Memory Scope:
-                      </span>
-                      <div
-                        style={{
-                          display: "inline-flex",
-                          background: "rgba(255, 255, 255, 0.05)",
-                          borderRadius: 7,
-                          padding: 2,
-                          border: "1px solid rgba(255, 255, 255, 0.09)",
-                        }}
+                  {/* Floating Scroll-To-Bottom Button */}
+                  <AnimatePresence>
+                    {showScrollToBottom && (
+                      <motion.button
+                        initial={{ opacity: 0, scale: 0.8, y: 10 }}
+                        animate={{ opacity: 1, scale: 1, y: 0 }}
+                        exit={{ opacity: 0, scale: 0.8, y: 10 }}
+                        whileHover={{ scale: 1.12 }}
+                        whileTap={{ scale: 0.9 }}
+                        transition={{ type: "spring", stiffness: 450, damping: 25 }}
+                        onClick={scrollToBottom}
+                        className="scroll-to-bottom-btn"
+                        title="Scroll to latest message"
+                        aria-label="Scroll to latest message"
                       >
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setUseGlobalMemory(true);
-                            if (typeof window !== "undefined") {
-                              localStorage.setItem("docmind_use_global_memory", "true");
-                            }
-                            showToast("Global Knowledge active: all previous documents & chats will be searched", "info");
-                          }}
-                          style={{
-                            display: "inline-flex",
-                            alignItems: "center",
-                            gap: 5,
-                            padding: "3px 8px",
-                            borderRadius: 5,
-                            border: "none",
-                            background: useGlobalMemory ? "#FFFFFF" : "transparent",
-                            color: useGlobalMemory ? "#000000" : "rgba(255, 255, 255, 0.6)",
-                            fontSize: 11,
-                            fontWeight: 600,
-                            cursor: "pointer",
-                            transition: "all 0.15s ease",
-                          }}
-                          title="Search knowledge from all previously uploaded documents + past conversation insights"
-                        >
-                          <Globe size={11} color={useGlobalMemory ? "#000000" : "currentColor"} />
-                          <span>Global Knowledge (All Docs)</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setUseGlobalMemory(false);
-                            if (typeof window !== "undefined") {
-                              localStorage.setItem("docmind_use_global_memory", "false");
-                            }
-                            showToast("Current Chat Only active: strictly queries this conversation", "info");
-                          }}
-                          style={{
-                            display: "inline-flex",
-                            alignItems: "center",
-                            gap: 5,
-                            padding: "3px 8px",
-                            borderRadius: 5,
-                            border: "none",
-                            background: !useGlobalMemory ? "#FFFFFF" : "transparent",
-                            color: !useGlobalMemory ? "#000000" : "rgba(255, 255, 255, 0.6)",
-                            fontSize: 11,
-                            fontWeight: 600,
-                            cursor: "pointer",
-                            transition: "all 0.15s ease",
-                          }}
-                          title="Strictly query only documents and messages belonging to this current chat"
-                        >
-                          <FileText size={11} color={!useGlobalMemory ? "#000000" : "currentColor"} />
-                          <span>Current Chat Only</span>
-                        </button>
-                      </div>
-                    </div>
-
-                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                      {isUploadingMidChat && (
-                        <div style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "#60A5FA", fontSize: 11 }}>
-                          <div className="spin" style={{ width: 10, height: 10, border: "1.5px solid #60A5FA", borderTopColor: "transparent", borderRadius: "50%" }} />
-                          <span>Uploading &amp; Indexing…</span>
-                        </div>
-                      )}
-                      {currentDocs.length > 0 && !isUploadingMidChat && (
-                        <span style={{ color: "rgba(255, 255, 255, 0.4)", fontSize: 10.5 }}>
-                          {currentDocs.length} {currentDocs.length === 1 ? "document" : "documents"} attached
-                        </span>
-                      )}
-                    </div>
-                  </div>
+                        <ArrowDown size={14} color="#FFFFFF" strokeWidth={2.5} />
+                      </motion.button>
+                    )}
+                  </AnimatePresence>
 
                   <input
                     type="file"
@@ -1759,8 +1644,7 @@ export default function HomePage() {
                   </div>
 
                   <div className="input-footer-hints">
-                    <span className="hide-on-mobile">Press <strong>Enter</strong> to send &bull; <strong>Shift+Enter</strong> for newline</span>
-                    <span className="hide-on-mobile"><strong>Ctrl+B</strong> to toggle sidebar</span>
+                    <span className="hide-on-mobile">Enter to send &bull; Shift+Enter for newline</span>
                     {inputValue.length > 0 && (
                       <span
                         className={`char-counter ${
