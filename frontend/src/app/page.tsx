@@ -154,13 +154,7 @@ export default function HomePage() {
   const [isShareModalOpen, setIsShareModalOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isUploadingMidChat, setIsUploadingMidChat] = useState(false);
-  const [useGlobalMemory, setUseGlobalMemory] = useState<boolean>(() => {
-    if (typeof window !== "undefined") {
-      const saved = localStorage.getItem("docmind_use_global_memory");
-      return saved !== null ? saved === "true" : true;
-    }
-    return true;
-  });
+  const [useGlobalMemory, setUseGlobalMemory] = useState<boolean>(true);
 
   // Handler functions for upgrade tools
   const handleOpenQuiz = async () => {
@@ -349,6 +343,10 @@ export default function HomePage() {
   useEffect(() => {
     purgeLegacyPlaintextKeys();
     setIsSidebarOpen(loadSidebarState());
+    try {
+      const savedMemory = localStorage.getItem("docmind_use_global_memory");
+      if (savedMemory !== null) setUseGlobalMemory(savedMemory === "true");
+    } catch {}
     loadSessionsList();
     verifyHealth();
 

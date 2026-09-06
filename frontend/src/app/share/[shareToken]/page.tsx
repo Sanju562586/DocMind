@@ -232,7 +232,7 @@ export default function SharedChatPage() {
       <div
         className="shared-chat-page"
         style={{
-          height: "100vh",
+          minHeight: "100vh",
           height: "100dvh",
           width: "100%",
           overflowY: "auto",
@@ -270,7 +270,7 @@ export default function SharedChatPage() {
       <div
         className="shared-chat-page"
         style={{
-          height: "100vh",
+          minHeight: "100vh",
           height: "100dvh",
           width: "100%",
           overflowY: "auto",
@@ -353,7 +353,7 @@ export default function SharedChatPage() {
       onScroll={handleScroll}
       className="shared-chat-page"
       style={{
-        height: "100vh",
+        minHeight: "100vh",
         height: "100dvh",
         width: "100%",
         overflowY: "auto",

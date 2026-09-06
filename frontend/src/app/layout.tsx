@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
+import { AuthProvider } from "@/lib/auth";
 import "./globals.css";
 import "katex/dist/katex.min.css";
 
@@ -60,8 +61,6 @@ export const viewport: Viewport = {
   themeColor: "#000000",
   colorScheme: "dark",
 };
-
-import { AuthProvider } from "@/lib/auth";
 
 export default function RootLayout({
   children,

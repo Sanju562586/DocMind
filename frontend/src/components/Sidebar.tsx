@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import {
   MessageSquare,
   Plus,
@@ -96,15 +96,16 @@ export default function Sidebar({
   const [isRenaming, setIsRenaming] = useState(false);
 
   // Pinned Sessions State
-  const [pinnedIds, setPinnedIds] = useState<string[]>(() => {
-    if (typeof window === "undefined") return [];
+  const [pinnedIds, setPinnedIds] = useState<string[]>([]);
+
+  useEffect(() => {
     try {
       const saved = localStorage.getItem("docmind_pinned_sessions");
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
+      if (saved) {
+        setPinnedIds(JSON.parse(saved));
+      }
+    } catch {}
+  }, []);
 
   // Subject Tag Filter State
   const [selectedTag, setSelectedTag] = useState<string>("All");
