@@ -204,6 +204,7 @@ export default function HomePage() {
     try {
       await compareDocuments(targetSession.id, docIds, focusTopic, apiKeys, {
         onToken: (t) => setCompareResult((prev) => prev + t),
+        onReset: () => setCompareResult(""),
         onDone: () => setIsCompareLoading(false),
         onError: (err) => {
           showToast(err);
@@ -764,6 +765,10 @@ export default function HomePage() {
             fullContent += token;
             setStreamingContent(fullContent);
           },
+          onReset: () => {
+            fullContent = "";
+            setStreamingContent("");
+          },
           onSources: (srcs) => {
             capturedSources = srcs;
           },
@@ -842,6 +847,10 @@ export default function HomePage() {
           onToken: (token) => {
             fullContent += token;
             setStreamingContent(fullContent);
+          },
+          onReset: () => {
+            fullContent = "";
+            setStreamingContent("");
           },
           onDone: () => {
             abortControllerRef.current = null;
@@ -953,6 +962,10 @@ export default function HomePage() {
           onToken: (token) => {
             fullContent += token;
             setStreamingContent(fullContent);
+          },
+          onReset: () => {
+            fullContent = "";
+            setStreamingContent("");
           },
           onSources: (srcs) => {
             capturedSources = srcs;

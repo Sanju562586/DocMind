@@ -29,7 +29,7 @@ from slowapi.errors import RateLimitExceeded
 from chunker import HierarchicalSemanticChunker
 from config import get_settings
 from document_parser import DocumentParser
-from llm_router import LLMRouter
+from llm_router import LLMRouter, LLM_STREAM_RESET
 from models import (
     ChatRequest, SessionCreate, SessionTitleUpdate,
     UrlIngestRequest, CompareRequest, QuizRequest,
@@ -1103,6 +1103,10 @@ async def chat(request: Request, body: ChatRequest):
                 groq_model=settings.groq_model,
                 openrouter_model=settings.openrouter_model,
             ):
+                if token == LLM_STREAM_RESET:
+                    full_response = ""
+                    yield _sse({"type": "reset"})
+                    continue
                 full_response += token
                 yield _sse({"type": "token", "content": token})
 
@@ -1202,6 +1206,10 @@ async def summarize_session(session_id: str, request: Request):
                 groq_model=settings.groq_model,
                 openrouter_model=settings.openrouter_model,
             ):
+                if token == LLM_STREAM_RESET:
+                    full = ""
+                    yield _sse({"type": "reset"})
+                    continue
                 full += token
                 yield _sse({"type": "token", "content": token})
 
@@ -1425,6 +1433,9 @@ async def compare_documents(session_id: str, request: Request, body: CompareRequ
                 groq_model=settings.groq_model,
                 openrouter_model=settings.openrouter_model,
             ):
+                if token == LLM_STREAM_RESET:
+                    yield _sse({"type": "reset"})
+                    continue
                 yield _sse({"type": "token", "content": token})
             yield _sse({"type": "done"})
         except Exception as exc:

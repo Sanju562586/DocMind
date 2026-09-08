@@ -561,6 +561,7 @@ export async function retryDocument(docId: string): Promise<Document> {
 
 export interface ChatStreamCallbacks {
   onToken: (token: string) => void;
+  onReset?: () => void;
   onSources?: (sources: Source[]) => void;
   onMemoryRecalled?: (memories: MemoryItem[]) => void;
   onDone: () => void;
@@ -622,6 +623,7 @@ export async function sendMessage(
         try {
           const event = JSON.parse(line.slice(6));
           if (event.type === "token") callbacks.onToken(event.content);
+          else if (event.type === "reset") callbacks.onReset?.();
           else if (event.type === "sources") callbacks.onSources?.(event.sources);
           else if (event.type === "memory_recalled") callbacks.onMemoryRecalled?.(event.memories);
           else if (event.type === "done") callbacks.onDone();
@@ -689,6 +691,7 @@ export async function summarizeSession(
         try {
           const ev = JSON.parse(line.slice(6));
           if (ev.type === "token") callbacks.onToken(ev.content);
+          else if (ev.type === "reset") callbacks.onReset?.();
           else if (ev.type === "done") callbacks.onDone();
           else if (ev.type === "error") callbacks.onError(ev.message || "Summarization stream error");
         } catch {
@@ -770,6 +773,7 @@ export async function compareDocuments(
         try {
           const ev = JSON.parse(line.slice(6));
           if (ev.type === "token") callbacks.onToken(ev.content);
+          else if (ev.type === "reset") callbacks.onReset?.();
           else if (ev.type === "done") callbacks.onDone();
           else if (ev.type === "error") callbacks.onError(ev.message || "Comparison error");
         } catch {

@@ -16,6 +16,10 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+# Special sentinel token yielded across stream generators when a model/provider fails mid-stream
+# and falls back to an alternative model from the beginning.
+LLM_STREAM_RESET = "\x00__DOCMIND_RESET_STREAM__\x00"
+
 
 class LLMProvider(ABC):
     name: str = "base"
@@ -34,12 +38,20 @@ class LLMProvider(ABC):
 class GeminiProvider(LLMProvider):
     name = "gemini"
     candidate_models = [
+        "gemini-3.8-flash",
         "gemini-3.7-flash",
         "gemini-3.6-flash",
+        "gemini-3.5-flash",
         "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-flash-latest",
+        "gemini-flash-lite-latest",
         "gemini-2.0-flash",
         "gemini-2.0-flash-lite",
         "gemini-1.5-flash",
+        "gemini-2.5-pro",
         "gemini-1.5-pro",
     ]
 
@@ -146,9 +158,20 @@ class GeminiProvider(LLMProvider):
 
             except Exception as exc:
                 last_exc = exc
+                err_str = str(exc).lower()
+                is_capacity_or_quota = any(
+                    sig in err_str
+                    for sig in ["503", "high demand", "temporarily", "unavailable", "429", "quota", "resourceexhausted", "not found", "404"]
+                )
                 if yielded_any:
-                    logger.error("Gemini SDK streaming failed mid-stream after yielding tokens: %s", exc)
-                    raise exc
+                    logger.warning("Gemini SDK model %s failed mid-stream after emitting tokens: %s. Emitting stream reset...", m_name, exc)
+                    yield LLM_STREAM_RESET
+                    yielded_any = False
+
+                if is_capacity_or_quota:
+                    logger.warning("Gemini model %s hit capacity/quota limit (%s). Bypassing REST and immediately trying next candidate model...", m_name, exc)
+                    continue
+
                 logger.warning("Gemini SDK model %s failed: %s. Trying REST API fallback...", m_name, exc)
 
             # 2. Direct HTTP REST API streaming fallback
@@ -199,9 +222,10 @@ class GeminiProvider(LLMProvider):
             except Exception as exc:
                 last_exc = exc
                 if yielded_any:
-                    logger.error("Gemini REST streaming failed mid-stream after yielding tokens: %s", exc)
-                    raise exc
-                logger.warning("Gemini REST model %s failed: %s. Trying next...", m_name, exc)
+                    logger.warning("Gemini REST model %s failed mid-stream after emitting tokens: %s. Emitting stream reset...", m_name, exc)
+                    yield LLM_STREAM_RESET
+                    yielded_any = False
+                logger.warning("Gemini REST model %s failed: %s. Trying next candidate model...", m_name, exc)
                 continue
 
         if last_exc:
@@ -281,9 +305,10 @@ class GroqProvider(LLMProvider):
             except Exception as exc:
                 last_exc = exc
                 if yielded_any:
-                    logger.error("Groq streaming failed mid-stream after yielding tokens: %s", exc)
-                    raise exc
-                logger.warning("Groq model %s failed: %s. Trying next...", m_name, exc)
+                    logger.warning("Groq model %s failed mid-stream after yielding tokens: %s. Emitting stream reset...", m_name, exc)
+                    yield LLM_STREAM_RESET
+                    yielded_any = False
+                logger.warning("Groq model %s failed: %s. Trying next candidate model...", m_name, exc)
                 continue
 
         if last_exc:
@@ -366,9 +391,10 @@ class OpenRouterProvider(LLMProvider):
             except Exception as exc:
                 last_exc = exc
                 if yielded_any:
-                    logger.error("OpenRouter streaming failed mid-stream after yielding tokens: %s", exc)
-                    raise exc
-                logger.warning("OpenRouter model %s failed: %s. Trying next...", m_name, exc)
+                    logger.warning("OpenRouter model %s failed mid-stream after yielding tokens: %s. Emitting stream reset...", m_name, exc)
+                    yield LLM_STREAM_RESET
+                    yielded_any = False
+                logger.warning("OpenRouter model %s failed: %s. Trying next candidate model...", m_name, exc)
                 continue
 
         if last_exc:
@@ -423,6 +449,10 @@ class LLMRouter:
                 async for token in provider.stream(
                     messages, api_key, model=model_map.get(provider.name)
                 ):
+                    if token == LLM_STREAM_RESET:
+                        token_count = 0
+                        yield LLM_STREAM_RESET
+                        continue
                     token_count += 1
                     yield token
                 logger.info("Provider %s succeeded (%d tokens)", provider.name, token_count)
@@ -431,9 +461,14 @@ class LLMRouter:
             except Exception as exc:
                 err_msg = f"{provider.name}: {type(exc).__name__}: {str(exc)[:120]}"
                 if token_count > 0:
-                    logger.error("Provider %s failed mid-stream after emitting %d tokens: %s", provider.name, token_count, err_msg)
-                    raise RuntimeError(f"Stream interrupted during generation ({provider.name}): {str(exc)[:150]}")
-                logger.warning("Provider %s failed, falling back to next provider - %s", provider.name, err_msg)
+                    logger.warning(
+                        "Provider %s failed mid-stream after emitting %d tokens: %s. Emitting reset and attempting next fallback provider...",
+                        provider.name, token_count, err_msg
+                    )
+                    yield LLM_STREAM_RESET
+                    token_count = 0
+                else:
+                    logger.warning("Provider %s failed, falling back to next provider - %s", provider.name, err_msg)
                 errors.append(err_msg)
                 continue
 
@@ -462,6 +497,9 @@ class LLMRouter:
             groq_model=groq_model,
             openrouter_model=openrouter_model,
         ):
+            if token == LLM_STREAM_RESET:
+                tokens.clear()
+                continue
             tokens.append(token)
         return "".join(tokens)
 
