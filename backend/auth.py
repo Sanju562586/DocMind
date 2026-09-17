@@ -127,8 +127,10 @@ def extract_user_identity(request: Request, secret: str) -> Dict[str, str]:
     if token:
         try:
             payload = verify_jwt(token, secret)
+            raw_uid = str(payload.get("sub") or payload.get("user_id") or "default_user")
+            clean_uid = raw_uid.replace("/", "").replace("\\", "").replace("..", "").strip() or "default_user"
             return {
-                "user_id": payload.get("sub") or payload.get("user_id") or "default_user",
+                "user_id": clean_uid,
                 "email": payload.get("email") or "verified@docmind.local",
                 "name": payload.get("name") or "Authenticated User",
                 "image": payload.get("image") or payload.get("picture") or "👤",

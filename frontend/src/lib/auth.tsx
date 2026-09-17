@@ -420,7 +420,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     <AuthContext.Provider
       value={{
         user,
-        isAuthenticated: Boolean(user && !user.email.includes("guest@")),
+        isAuthenticated: Boolean(user && !user.isDemo && !user.email.includes("guest@")),
         isAuthModalOpen,
         authNotification,
         clearAuthNotification,

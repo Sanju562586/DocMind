@@ -18,11 +18,12 @@ function safeParseJson(str: string): any {
 }
 
 function getBaseUrl(req: NextRequest): string {
-  // If explicitly configured in environment, prefer it
-  if (process.env.NEXTAUTH_URL && !process.env.NEXTAUTH_URL.includes("localhost")) {
+  // Always prefer explicitly configured URLs — they are the canonical redirect URI registered
+  // with the OAuth provider, regardless of whether they point to localhost or production.
+  if (process.env.NEXTAUTH_URL) {
     return process.env.NEXTAUTH_URL.replace(/\/+$/, "");
   }
-  if (process.env.NEXT_PUBLIC_APP_URL && !process.env.NEXT_PUBLIC_APP_URL.includes("localhost")) {
+  if (process.env.NEXT_PUBLIC_APP_URL) {
     return process.env.NEXT_PUBLIC_APP_URL.replace(/\/+$/, "");
   }
 
@@ -71,7 +72,37 @@ interface StateData {
   ts: number;
 }
 
-function createOAuthState(returnTo: string, redirectUri: string, provider: string): { nonce: string; cookieValue: string } {
+function signOAuthState(payload: StateData): string {
+  const secret = process.env.AUTH_SECRET || "docmind_jwt_secret_dev_key_change_in_production";
+  const dataStr = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const hmac = crypto.createHmac("sha256", secret).update(dataStr).digest("base64url");
+  return `${dataStr}.${hmac}`;
+}
+
+function verifyAndParseState(stateStr?: string | null): StateData | null {
+  if (!stateStr) return null;
+  try {
+    const parts = stateStr.split(".");
+    if (parts.length !== 2) return null;
+    const [dataStr, signature] = parts;
+    const secret = process.env.AUTH_SECRET || "docmind_jwt_secret_dev_key_change_in_production";
+    const expectedHmac = crypto.createHmac("sha256", secret).update(dataStr).digest("base64url");
+    const sigBuf = Buffer.from(signature);
+    const expBuf = Buffer.from(expectedHmac);
+    if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+      return null;
+    }
+    const data: StateData = JSON.parse(Buffer.from(dataStr, "base64url").toString("utf8"));
+    if (data.ts && Date.now() - data.ts > 15 * 60 * 1000) {
+      return null;
+    }
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function createOAuthState(returnTo: string, redirectUri: string, provider: string): { stateParam: string; nonce: string; cookieValue: string } {
   const nonce = crypto.randomBytes(24).toString("hex");
   const payload: StateData = {
     nonce,
@@ -80,8 +111,9 @@ function createOAuthState(returnTo: string, redirectUri: string, provider: strin
     provider,
     ts: Date.now(),
   };
+  const stateParam = signOAuthState(payload);
   const cookieValue = Buffer.from(JSON.stringify(payload)).toString("base64url");
-  return { nonce, cookieValue };
+  return { stateParam, nonce, cookieValue };
 }
 
 function parseOAuthState(cookieValue?: string): StateData | null {
@@ -246,7 +278,7 @@ export async function GET(
 
     // Official Google OAuth 2.0 Authorization Code Flow
     const redirectUri = process.env.GOOGLE_REDIRECT_URI || `${baseUrl}/api/auth/callback/google`;
-    const { nonce, cookieValue } = createOAuthState(returnTo, redirectUri, "google");
+    const { stateParam, cookieValue } = createOAuthState(returnTo, redirectUri, "google");
 
     const googleAuthUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
     googleAuthUrl.searchParams.set("client_id", clientId);
@@ -255,7 +287,7 @@ export async function GET(
     googleAuthUrl.searchParams.set("scope", "openid email profile");
     googleAuthUrl.searchParams.set("access_type", "offline");
     googleAuthUrl.searchParams.set("prompt", "select_account");
-    googleAuthUrl.searchParams.set("state", nonce);
+    googleAuthUrl.searchParams.set("state", stateParam);
 
     const res = NextResponse.redirect(googleAuthUrl.toString());
     res.cookies.set("docmind_oauth_state", cookieValue, {
@@ -318,13 +350,13 @@ export async function GET(
     }
 
     const redirectUri = `${baseUrl}/api/auth/callback/github`;
-    const { nonce, cookieValue } = createOAuthState(returnTo, redirectUri, "github");
+    const { stateParam, cookieValue } = createOAuthState(returnTo, redirectUri, "github");
 
     const githubAuthUrl = new URL("https://github.com/login/oauth/authorize");
     githubAuthUrl.searchParams.set("client_id", clientId);
     githubAuthUrl.searchParams.set("redirect_uri", redirectUri);
     githubAuthUrl.searchParams.set("scope", "read:user user:email");
-    githubAuthUrl.searchParams.set("state", nonce);
+    githubAuthUrl.searchParams.set("state", stateParam);
 
     const res = NextResponse.redirect(githubAuthUrl.toString());
     res.cookies.set("docmind_oauth_state", cookieValue, {
@@ -344,9 +376,11 @@ export async function GET(
     const errorDesc = req.nextUrl.searchParams.get("error_description");
     const stateParam = req.nextUrl.searchParams.get("state");
 
-    // Retrieve and validate OAuth state cookie
+    // Retrieve and validate OAuth state (supports both HMAC-signed state token and cookie)
     const stateCookieVal = req.cookies.get("docmind_oauth_state")?.value;
-    const stateData = parseOAuthState(stateCookieVal);
+    const cookieStateData = parseOAuthState(stateCookieVal);
+    const signedStateData = verifyAndParseState(stateParam);
+    const stateData = signedStateData || cookieStateData;
 
     const targetReturnTo = stateData?.returnTo || "/";
     const redirectUri = stateData?.redirectUri || process.env.GOOGLE_REDIRECT_URI || `${baseUrl}/api/auth/callback/google`;
@@ -365,11 +399,16 @@ export async function GET(
       return res;
     }
 
-    // CSRF State validation
-    if (!stateData || !stateParam || stateData.nonce !== stateParam) {
-      console.warn("OAuth state validation mismatch or expired state cookie.");
+    // CSRF State validation: either signed state signature verified, or cookie matches
+    const isStateValid = Boolean(
+      signedStateData ||
+      (cookieStateData && stateParam && cookieStateData.nonce === stateParam)
+    );
+
+    if (!isStateValid || !stateData) {
+      console.warn("Google OAuth state validation mismatch or expired state.");
       targetUrl.searchParams.set("error", "oauth_state_invalid");
-      targetUrl.searchParams.set("description", "Session verification expired. Please try signing in again.");
+      targetUrl.searchParams.set("description", "Session verification expired or invalid. Please try signing in again.");
       const res = NextResponse.redirect(targetUrl.toString());
       res.cookies.delete("docmind_oauth_state");
       return res;
@@ -502,7 +541,9 @@ export async function GET(
     const stateParam = req.nextUrl.searchParams.get("state");
 
     const stateCookieVal = req.cookies.get("docmind_oauth_state")?.value;
-    const stateData = parseOAuthState(stateCookieVal);
+    const cookieStateData = parseOAuthState(stateCookieVal);
+    const signedStateData = verifyAndParseState(stateParam);
+    const stateData = signedStateData || cookieStateData;
     const targetReturnTo = stateData?.returnTo || "/";
     const redirectTarget = `${baseUrl}${targetReturnTo.startsWith("/") ? targetReturnTo : `/${targetReturnTo}`}`;
     const targetUrl = new URL(redirectTarget, baseUrl);
@@ -516,9 +557,15 @@ export async function GET(
       return res;
     }
 
-    if (!stateData || !stateParam || stateData.nonce !== stateParam) {
-      console.warn("GitHub OAuth state verification mismatch.");
+    const isStateValid = Boolean(
+      signedStateData ||
+      (cookieStateData && stateParam && cookieStateData.nonce === stateParam)
+    );
+
+    if (!isStateValid || !stateData) {
+      console.warn("GitHub OAuth state verification mismatch or expired state.");
       targetUrl.searchParams.set("error", "oauth_state_invalid");
+      targetUrl.searchParams.set("description", "Session verification expired or invalid. Please try signing in again.");
       const res = NextResponse.redirect(targetUrl.toString());
       res.cookies.delete("docmind_oauth_state");
       return res;
@@ -565,8 +612,10 @@ export async function GET(
                 });
                 if (emailsRes.ok) {
                   const emails = await emailsRes.json();
-                  const primary = emails.find((e: any) => e.primary && e.verified);
-                  email = primary?.email || emails[0]?.email;
+                  if (Array.isArray(emails)) {
+                    const primary = emails.find((e: any) => e.primary && e.verified);
+                    email = primary?.email || emails[0]?.email;
+                  }
                 }
               }
 
@@ -642,7 +691,27 @@ export async function POST(
     action === "google"
   ) {
     try {
-      const body = await req.json();
+      let body: any = {};
+      const contentType = req.headers.get("content-type") || "";
+      if (contentType.includes("application/json")) {
+        body = await req.json().catch(() => ({}));
+      } else if (
+        contentType.includes("application/x-www-form-urlencoded") ||
+        contentType.includes("multipart/form-data")
+      ) {
+        const formData = await req.formData().catch(() => null);
+        if (formData) {
+          body = Object.fromEntries(formData.entries());
+        }
+      } else {
+        try {
+          body = await req.json();
+        } catch {
+          const formData = await req.formData().catch(() => null);
+          if (formData) body = Object.fromEntries(formData.entries());
+        }
+      }
+
       const credential = body.credential || body.id_token;
 
       if (!credential) {
@@ -664,11 +733,13 @@ export async function POST(
       }
 
       const payload = await tokenInfoRes.json();
-      const clientId = (process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || process.env.GOOGLE_CLIENT_ID || "").trim();
+      const clientId1 = (process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || "").trim();
+      const clientId2 = (process.env.GOOGLE_CLIENT_ID || "").trim();
+      const validClientIds = [clientId1, clientId2].filter((id) => id && !id.startsWith("your_"));
 
       // Verify token audience matches our configured Google Client ID if configured
-      if (clientId && !clientId.startsWith("your_") && payload.aud !== clientId) {
-        console.warn("Google token audience mismatch:", payload.aud, "expected:", clientId);
+      if (validClientIds.length > 0 && !validClientIds.includes(payload.aud)) {
+        console.warn("Google token audience mismatch:", payload.aud, "expected one of:", validClientIds);
         return NextResponse.json(
           { error: "Token audience mismatch", details: "Credential was issued for a different client ID" },
           { status: 403 }
@@ -710,7 +781,12 @@ export async function POST(
         isDemo: false,
       });
 
-      const res = NextResponse.json({ status: "authenticated", user, token });
+      const baseUrl = getBaseUrl(req);
+      const isHtmlRequest = req.headers.get("accept")?.includes("text/html");
+
+      const res = isHtmlRequest
+        ? NextResponse.redirect(new URL(`${baseUrl}/?auth=google_success`, baseUrl).toString())
+        : NextResponse.json({ status: "authenticated", user, token });
 
       // Set secure session cookie
       res.cookies.set("docmind_session", token, {

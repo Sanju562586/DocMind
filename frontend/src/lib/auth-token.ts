@@ -57,11 +57,15 @@ export function verifyJwt(token: string, secret: string = JWT_SECRET): UserPaylo
     const [encodedHeader, encodedPayload, encodedSignature] = parts;
     const signingInput = `${encodedHeader}.${encodedPayload}`;
 
-    const expectedSignature = base64UrlEncode(
-      crypto.createHmac("sha256", secret).update(signingInput).digest()
-    );
-
-    if (encodedSignature !== expectedSignature) {
+    // Constant-time comparison on raw digest bytes — prevents timing-based signature forgery
+    const expectedSigBytes = crypto.createHmac("sha256", secret).update(signingInput).digest();
+    let b64 = encodedSignature.replace(/-/g, "+").replace(/_/g, "/");
+    while (b64.length % 4) b64 += "=";
+    const actualSigBytes = Buffer.from(b64, "base64");
+    if (
+      expectedSigBytes.length !== actualSigBytes.length ||
+      !crypto.timingSafeEqual(expectedSigBytes, actualSigBytes)
+    ) {
       return null;
     }
 
