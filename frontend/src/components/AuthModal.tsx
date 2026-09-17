@@ -210,9 +210,22 @@ export function AuthModal() {
     setIsLoading(false);
   };
 
+  // Close on Escape key press
+  React.useEffect(() => {
+    if (!isAuthModalOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        closeAuthModal();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isAuthModalOpen, closeAuthModal]);
+
   return (
     <AnimatePresence>
-      <motion.div
+      {isAuthModalOpen && (
+        <motion.div
         className="upload-modal-overlay"
         onClick={closeAuthModal}
         initial={{ opacity: 0 }}
@@ -976,6 +989,7 @@ export function AuthModal() {
           </div>
         </motion.div>
       </motion.div>
+      )}
     </AnimatePresence>
   );
 }
