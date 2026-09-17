@@ -39,15 +39,28 @@ export const DEMO_PROFILES: DemoProfile[] = [
   },
 ];
 
+export interface AuthErrorDetails {
+  error: string;
+  description?: string;
+  redirectUri?: string;
+}
+
 interface AuthContextType {
   user: User | null;
   isAuthenticated: boolean;
   isAuthModalOpen: boolean;
+  authNotification: { type: "success" | "error" | "info"; message: string } | null;
+  clearAuthNotification: () => void;
+  authErrorDetails: AuthErrorDetails | null;
+  clearAuthErrorDetails: () => void;
+  googleClientId: string | null;
+  googleConfigured: boolean;
   openAuthModal: () => void;
   closeAuthModal: () => void;
   loginDemo: (profileKey: string) => void;
   loginWithCredentials: (email: string, name: string) => void;
-  loginWithOAuth: (provider: "google" | "github") => Promise<void>;
+  loginWithOAuth: (provider: "google" | "github", isDemo?: boolean) => Promise<void>;
+  loginWithGoogleCredential: (credential: string) => Promise<boolean>;
   logout: () => void;
 }
 
@@ -109,56 +122,171 @@ function clearUserStorage() {
   }
 }
 
-function loadSavedUser(): User | null {
-  if (typeof window === "undefined") return null;
-  // 1. Try localStorage first (resilient across tabs and unaffected by cookie policies)
+function parseUser(jsonStr: string | null): User | null {
+  if (!jsonStr) return null;
   try {
-    const ls = localStorage.getItem("docmind_user");
-    if (ls) {
-      const parsed = JSON.parse(ls);
-      if (parsed && parsed.id) return parsed;
-    }
-  } catch {
-    // ignore
-  }
-  // 2. Try cookie fallback
-  try {
-    const savedCookie = getCookie("docmind_user");
-    if (savedCookie) {
-      const parsed = JSON.parse(savedCookie);
-      if (parsed && parsed.id) return parsed;
-    }
+    const raw = jsonStr.trim();
+    const str = raw.startsWith("{") ? raw : decodeURIComponent(raw);
+    const parsed = JSON.parse(str);
+    if (parsed && parsed.id) return parsed;
   } catch {
     // ignore
   }
   return null;
 }
 
+function loadSavedUser(): User | null {
+  if (typeof window === "undefined") return null;
+  // 1. Authoritative check: cookie docmind_user (set directly by server on OAuth redirect)
+  const cookieUser = parseUser(getCookie("docmind_user"));
+
+  // 2. Check localStorage
+  let lsUser: User | null = null;
+  try {
+    lsUser = parseUser(localStorage.getItem("docmind_user"));
+  } catch {
+    // ignore
+  }
+
+  // If cookie user is a real authenticated login (!isDemo), it ALWAYS overrides demo localStorage
+  if (cookieUser && !cookieUser.isDemo) {
+    return cookieUser;
+  }
+  // If cookie user has a non-credentials provider (google, github), it ALWAYS overrides generic guest
+  if (cookieUser && (cookieUser.provider === "google" || cookieUser.provider === "github")) {
+    return cookieUser;
+  }
+  // Otherwise, use localStorage user if present, or fallback to cookie user
+  if (lsUser) {
+    return lsUser;
+  }
+  return cookieUser;
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [authNotification, setAuthNotification] = useState<{ type: "success" | "error" | "info"; message: string } | null>(null);
+  const [authErrorDetails, setAuthErrorDetails] = useState<AuthErrorDetails | null>(null);
+  const [googleClientId, setGoogleClientId] = useState<string | null>(null);
+  const [googleConfigured, setGoogleConfigured] = useState(false);
 
-  // Initialize user from cookie or localStorage or default demo profile
+  const clearAuthNotification = useCallback(() => setAuthNotification(null), []);
+  const clearAuthErrorDetails = useCallback(() => setAuthErrorDetails(null), []);
+
+  // Initialize user from cookie or localStorage, hydrate from server, and handle OAuth callbacks
   useEffect(() => {
+    // 1. Synchronously load saved user
     const saved = loadSavedUser();
     if (saved) {
       setUser(saved);
       saveUserStorage(saved);
-      return;
+    } else {
+      const defaultProfile = DEMO_PROFILES[0];
+      const defaultUser: User = {
+        id: emailToUserId(defaultProfile.email),
+        name: defaultProfile.name,
+        email: defaultProfile.email,
+        role: defaultProfile.role,
+        image: defaultProfile.avatar,
+        isDemo: true,
+      };
+      setUser(defaultUser);
+      saveUserStorage(defaultUser);
     }
 
-    // Default to Alex Rivera demo account for immediate interactive experience
-    const defaultProfile = DEMO_PROFILES[0];
-    const defaultUser: User = {
-      id: emailToUserId(defaultProfile.email),
-      name: defaultProfile.name,
-      email: defaultProfile.email,
-      role: defaultProfile.role,
-      image: defaultProfile.avatar,
-      isDemo: true,
-    };
-    setUser(defaultUser);
-    saveUserStorage(defaultUser);
+    // 2. Hydrate from server session endpoint
+    fetch("/api/auth/session")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.user?.id) {
+          setUser(data.user);
+          saveUserStorage(data.user);
+        }
+      })
+      .catch(() => {});
+
+    // 3. Query providers to detect Google OAuth configuration & client ID
+    fetch("/api/auth/providers")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.google) {
+          setGoogleConfigured(Boolean(data.google.configured));
+          if (data.google.clientId) {
+            setGoogleClientId(data.google.clientId);
+          }
+        }
+      })
+      .catch(() => {});
+
+    // 4. Inspect URL for OAuth redirect query parameters
+    if (typeof window !== "undefined") {
+      const url = new URL(window.location.href);
+      const authParam = url.searchParams.get("auth");
+      const errorParam = url.searchParams.get("error");
+      const descParam = url.searchParams.get("description") || url.searchParams.get("details");
+      const redirectUriParam = url.searchParams.get("redirect_uri");
+
+      if (authParam) {
+        // Read fresh user from cookie
+        const freshUser = parseUser(getCookie("docmind_user"));
+        if (freshUser) {
+          setUser(freshUser);
+          saveUserStorage(freshUser);
+        }
+        if (authParam.includes("google")) {
+          setAuthNotification({
+            type: "success",
+            message: `Connected Google account as ${freshUser?.name || "Google User"} (${freshUser?.email || ""})!`,
+          });
+        } else if (authParam.includes("github")) {
+          setAuthNotification({
+            type: "success",
+            message: `Connected GitHub account as ${freshUser?.name || "GitHub User"}!`,
+          });
+        }
+        url.searchParams.delete("auth");
+        window.history.replaceState({}, "", url.pathname + (url.search ? `?${url.searchParams.toString()}` : ""));
+      }
+
+      if (errorParam) {
+        let msg = "Sign-in encountered an issue.";
+        if (errorParam.includes("access_denied")) {
+          msg = "Google sign-in was cancelled by the user.";
+        } else if (errorParam.includes("redirect_uri_mismatch")) {
+          msg = "Google Cloud Console redirect URI mismatch. Please verify Authorized Redirect URIs in your Google Cloud project.";
+        } else if (errorParam.includes("google")) {
+          msg = `Google sign-in could not be completed (${descParam || errorParam}).`;
+        } else if (errorParam.includes("github")) {
+          msg = `GitHub sign-in was not completed (${descParam || errorParam}).`;
+        }
+
+        setAuthNotification({
+          type: "error",
+          message: msg,
+        });
+
+        if (errorParam.includes("google") || errorParam.includes("redirect_uri")) {
+          setAuthErrorDetails({
+            error: errorParam,
+            description: descParam || undefined,
+            redirectUri: redirectUriParam || `${window.location.origin}/api/auth/callback/google`,
+          });
+          // Auto-open modal so user sees diagnostic guide and can fix or demo
+          setIsAuthModalOpen(true);
+        }
+
+        url.searchParams.delete("error");
+        if (descParam) {
+          url.searchParams.delete("description");
+          url.searchParams.delete("details");
+        }
+        if (redirectUriParam) {
+          url.searchParams.delete("redirect_uri");
+        }
+        window.history.replaceState({}, "", url.pathname + (url.search ? `?${url.searchParams.toString()}` : ""));
+      }
+    }
   }, []);
 
   const loginDemo = useCallback((profileKey: string) => {
@@ -179,10 +307,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          id: demoUser.id,
           email: demoUser.email,
           name: demoUser.name,
           image: demoUser.image,
           provider: "credentials",
+          isDemo: true,
         }),
       }).catch(() => {});
     } catch {}
@@ -208,20 +338,57 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          id: newUser.id,
           email: newUser.email,
           name: newUser.name,
           image: newUser.image,
           provider: "credentials",
+          isDemo: false,
         }),
       }).catch(() => {});
     } catch {}
     setIsAuthModalOpen(false);
   }, []);
 
-  const loginWithOAuth = useCallback(async (provider: "google" | "github") => {
+  const loginWithOAuth = useCallback(async (provider: "google" | "github", isDemo: boolean = false) => {
     setIsAuthModalOpen(false);
     if (typeof window !== "undefined") {
-      window.location.href = `/api/auth/signin/${provider}`;
+      window.location.href = `/api/auth/signin/${provider}${isDemo ? "?demo=true" : ""}`;
+    }
+  }, []);
+
+  const loginWithGoogleCredential = useCallback(async (credential: string): Promise<boolean> => {
+    try {
+      const res = await fetch("/api/auth/callback/google", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ credential, provider: "google" }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.details || data.error || "Google credential verification failed");
+      }
+
+      const data = await res.json();
+      if (data?.user) {
+        setUser(data.user);
+        saveUserStorage(data.user);
+        setAuthNotification({
+          type: "success",
+          message: `Signed in with Google as ${data.user.name} (${data.user.email})!`,
+        });
+        setIsAuthModalOpen(false);
+        return true;
+      }
+      return false;
+    } catch (err: any) {
+      console.error("Google credential sign-in error:", err);
+      setAuthNotification({
+        type: "error",
+        message: err?.message || "Failed to authenticate with Google credential.",
+      });
+      return false;
     }
   }, []);
 
@@ -255,11 +422,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         user,
         isAuthenticated: Boolean(user && !user.email.includes("guest@")),
         isAuthModalOpen,
+        authNotification,
+        clearAuthNotification,
+        authErrorDetails,
+        clearAuthErrorDetails,
+        googleClientId,
+        googleConfigured,
         openAuthModal,
         closeAuthModal,
         loginDemo,
         loginWithCredentials,
         loginWithOAuth,
+        loginWithGoogleCredential,
         logout,
       }}
     >

@@ -326,6 +326,36 @@ docker-compose down
 | `MAX_FILE_SIZE_BYTES` | `52428800` | Maximum upload size in bytes (50 MB) |
 | `RATE_LIMIT_CHAT` | `20/minute` | Rate limit for chat message requests |
 | `RATE_LIMIT_SUMMARIZE` | `10/minute` | Rate limit for full document summarization |
+| `AUTH_SECRET` | `"docmind_jwt_secret_dev_key..."` | 32+ char secret for HS256 JWT session tokens |
+| `GOOGLE_CLIENT_ID` | `""` | Google OAuth 2.0 Web Client ID |
+| `GOOGLE_CLIENT_SECRET` | `""` | Google OAuth 2.0 Client Secret |
+| `GITHUB_CLIENT_ID` | `""` | GitHub OAuth Client ID |
+| `GITHUB_CLIENT_SECRET` | `""` | GitHub OAuth Client Secret |
+
+### Frontend (`frontend/.env.local`)
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `BACKEND_URL` | `http://127.0.0.1:8000` | Backend API URL for server-side proxying |
+| `NEXTAUTH_URL` | `http://localhost:3000` | Application canonical URL for OAuth callbacks |
+| `AUTH_SECRET` | `""` | 32+ char cryptographic JWT session signing key |
+| `GOOGLE_CLIENT_ID` | `""` | Google OAuth Client ID |
+| `NEXT_PUBLIC_GOOGLE_CLIENT_ID` | `""` | Google Client ID exposed for Google Identity Services (GIS) button |
+| `GOOGLE_CLIENT_SECRET` | `""` | Google OAuth Client Secret |
+| `GITHUB_CLIENT_ID` | `""` | GitHub OAuth Client ID |
+| `GITHUB_CLIENT_SECRET` | `""` | GitHub OAuth Client Secret |
+
+#### 🔑 Google Cloud Console Configuration
+To enable Google Sign-In in your own Google Cloud project:
+1. Go to [Google Cloud Console Credentials](https://console.cloud.google.com/apis/credentials).
+2. Create or select an **OAuth 2.0 Client ID** (Application type: **Web application**).
+3. Under **Authorized JavaScript origins**, add:
+   - `http://localhost:3000` (for local development)
+   - `https://yourdomain.com` (for production)
+4. Under **Authorized redirect URIs**, add:
+   - `http://localhost:3000/api/auth/callback/google` (for local development)
+   - `https://yourdomain.com/api/auth/callback/google` (for production)
+5. Copy the **Client ID** and **Client Secret** into `frontend/.env.local` and `backend/.env`.
 
 ---
 

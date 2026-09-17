@@ -768,21 +768,60 @@ class SessionStore:
         image: Optional[str] = None,
         provider: str = "credentials",
     ) -> Dict[str, Any]:
-        """Insert or update user record when authenticated."""
+        """Insert or update user record when authenticated, smoothly handling email-based account linking."""
+        clean_email = (email or "").strip().lower() or f"{user_id}@docmind.local"
+        display_name = (name or "").strip() or clean_email.split("@")[0] or "User"
+        avatar = image or ("🌐" if provider == "google" else "🐙" if provider == "github" else "👤")
+
         with self._conn() as conn:
-            conn.execute(
-                """INSERT INTO users (id, email, name, image, provider, last_login_at)
-                   VALUES (?, ?, ?, ?, ?, datetime('now'))
-                   ON CONFLICT(id) DO UPDATE SET
-                       email = excluded.email,
-                       name = excluded.name,
-                       image = excluded.image,
-                       provider = excluded.provider,
-                       last_login_at = datetime('now')""",
-                (user_id, email, name or email.split("@")[0], image or "👤", provider),
-            )
+            # 1. Check if user with this user_id already exists
+            existing_by_id = conn.execute("SELECT id, email, name FROM users WHERE id = ?", (user_id,)).fetchone()
+            # 2. Check if user with this email already exists
+            existing_by_email = conn.execute("SELECT id, email, name FROM users WHERE LOWER(email) = ?", (clean_email,)).fetchone()
+
+            if existing_by_id:
+                # Update existing user record by ID
+                conn.execute(
+                    """UPDATE users SET
+                           email = ?,
+                           name = ?,
+                           image = ?,
+                           provider = ?,
+                           last_login_at = datetime('now')
+                       WHERE id = ?""",
+                    (clean_email, display_name, avatar, provider, user_id),
+                )
+            elif existing_by_email:
+                # Account linking: email exists under another ID (e.g. earlier guest/credentials session)
+                old_id = existing_by_email["id"]
+                try:
+                    # Migrate existing sessions and global memories to new user_id so user keeps their history
+                    conn.execute("UPDATE sessions SET user_id = ? WHERE user_id = ?", (user_id, old_id))
+                    conn.execute("UPDATE global_memory SET user_id = ? WHERE user_id = ?", (user_id, old_id))
+                except Exception as exc:
+                    logger.debug("Session migration warning during account linking: %s", exc)
+
+                # Update the existing record to the new authenticated user ID and provider
+                conn.execute(
+                    """UPDATE users SET
+                           id = ?,
+                           name = ?,
+                           image = ?,
+                           provider = ?,
+                           last_login_at = datetime('now')
+                       WHERE id = ?""",
+                    (user_id, display_name, avatar, provider, old_id),
+                )
+            else:
+                # Clean insertion of new user
+                conn.execute(
+                    """INSERT INTO users (id, email, name, image, provider, last_login_at)
+                       VALUES (?, ?, ?, ?, ?, datetime('now'))""",
+                    (user_id, clean_email, display_name, avatar, provider),
+                )
+
             row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-            return dict(row) if row else {"id": user_id, "email": email, "name": name}
+            return dict(row) if row else {"id": user_id, "email": clean_email, "name": display_name}
 
     def get_user(self, user_id: str) -> Optional[Dict[str, Any]]:
         with self._conn() as conn:

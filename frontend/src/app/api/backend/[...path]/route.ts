@@ -66,6 +66,8 @@ async function handleProxy(
     }
     if (user?.email) headers.set("X-User-Email", user.email);
     if (user?.name) headers.set("X-User-Name", user.name);
+    if (user?.image) headers.set("X-User-Image", user.image);
+    if (user?.provider) headers.set("X-User-Provider", user.provider);
   }
 
   // Forward incoming client identity headers if cookie was absent or empty
@@ -81,6 +83,14 @@ async function handleProxy(
   const clientUserName = req.headers.get("x-user-name");
   if (clientUserName && !headers.get("X-User-Name")) {
     headers.set("X-User-Name", clientUserName);
+  }
+  const clientUserImage = req.headers.get("x-user-image");
+  if (clientUserImage && !headers.get("X-User-Image")) {
+    headers.set("X-User-Image", clientUserImage);
+  }
+  const clientUserProvider = req.headers.get("x-user-provider");
+  if (clientUserProvider && !headers.get("X-User-Provider")) {
+    headers.set("X-User-Provider", clientUserProvider);
   }
 
   // 2. Inject Secure HTTP-only API Keys server-to-server (User-scoped cookie first)

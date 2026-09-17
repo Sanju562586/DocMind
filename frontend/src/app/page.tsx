@@ -103,7 +103,7 @@ function saveSidebarState(isOpen: boolean) {
 type ModalType = "none" | "upload" | "settings" | "memory" | "pipeline" | "shortcuts";
 
 export default function HomePage() {
-  const { user } = useAuth();
+  const { user, authNotification, clearAuthNotification } = useAuth();
   const [apiKeys, setApiKeys] = useState<ApiKeys>({ gemini: "", groq: "", openrouter: "" });
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSession, setActiveSession] = useState<Session | null>(null);
@@ -346,6 +346,14 @@ export default function HomePage() {
   const removeToast = useCallback((id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
+
+  // ── Show toast on OAuth feedback or error ──────────────────────────────────
+  useEffect(() => {
+    if (authNotification) {
+      showToast(authNotification.message, authNotification.type);
+      clearAuthNotification();
+    }
+  }, [authNotification, showToast, clearAuthNotification]);
 
   // ── Load initial data & keyboard shortcuts ──────────────────────────────────
   useEffect(() => {

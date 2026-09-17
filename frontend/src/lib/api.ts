@@ -9,37 +9,50 @@ const API_BASE = process.env.NEXT_PUBLIC_DIRECT_API === "true" && process.env.NE
 function getUserHeaders(): Record<string, string> {
   if (typeof window === "undefined") return {};
   try {
-    // 1. Try localStorage first (fast, strictly persistent, avoids cookie loss/expiration)
-    if (typeof localStorage !== "undefined") {
-      const ls = localStorage.getItem("docmind_user");
-      if (ls) {
-        const user = JSON.parse(ls);
-        if (user && user.id) {
-          return {
-            "X-User-Id": user.id,
-            "X-User-Email": user.email || "guest@docmind.local",
-            "X-User-Name": user.name || "Guest User",
-          };
-        }
-      }
-    }
-    // 2. Try cookie fallback
+    let cookieUser: any = null;
     if (typeof document !== "undefined") {
       const cookies = document.cookie.split(";");
       for (let c of cookies) {
         c = c.trim();
         if (c.startsWith("docmind_user=")) {
           const val = c.substring("docmind_user=".length);
-          const user = JSON.parse(decodeURIComponent(val));
-          if (user && user.id) {
-            return {
-              "X-User-Id": user.id,
-              "X-User-Email": user.email || "guest@docmind.local",
-              "X-User-Name": user.name || "Guest User",
-            };
+          try {
+            const raw = val.trim();
+            const clean = raw.startsWith("{") ? raw : decodeURIComponent(raw);
+            cookieUser = JSON.parse(clean);
+          } catch {
+            try {
+              cookieUser = JSON.parse(val);
+            } catch {}
           }
+          break;
         }
       }
+    }
+
+    let lsUser: any = null;
+    if (typeof localStorage !== "undefined") {
+      const ls = localStorage.getItem("docmind_user");
+      if (ls) {
+        try {
+          const raw = ls.trim();
+          const clean = raw.startsWith("{") ? raw : decodeURIComponent(raw);
+          lsUser = JSON.parse(clean);
+        } catch {
+          try {
+            lsUser = JSON.parse(ls);
+          } catch {}
+        }
+      }
+    }
+
+    const effectiveUser = (cookieUser && (!cookieUser.isDemo || !lsUser)) ? cookieUser : (lsUser || cookieUser);
+    if (effectiveUser && effectiveUser.id) {
+      return {
+        "X-User-Id": effectiveUser.id,
+        "X-User-Email": effectiveUser.email || "guest@docmind.local",
+        "X-User-Name": effectiveUser.name || "Guest User",
+      };
     }
   } catch {
     // ignore parsing errors

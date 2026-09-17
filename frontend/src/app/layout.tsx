@@ -78,6 +78,7 @@ export default function RootLayout({
         <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
         <meta name="apple-mobile-web-app-title" content="DocMind AI" />
         <meta name="format-detection" content="telephone=no" />
+        <script src="https://accounts.google.com/gsi/client" async defer></script>
       </head>
       <body>
         <AuthProvider>{children}</AuthProvider>
