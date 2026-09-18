@@ -5,14 +5,13 @@ import {
   Upload,
   Search,
   Layers,
-  BarChart3,
   MessageSquare,
-  Database,
-  RefreshCw,
   Sparkles,
   Zap,
   ShieldCheck,
-  Cpu,
+  FileText,
+  CheckCircle2,
+  Sliders,
   ArrowRight,
 } from "lucide-react";
 import { motion, Variants } from "framer-motion";
@@ -22,6 +21,7 @@ interface EmptyStateProps {
   onStartNewChat: () => void;
   onOpenSettings: () => void;
   onSelectPrompt?: (prompt: string) => void;
+  onUploadDocument?: () => void;
 }
 
 const containerVariants: Variants = {
@@ -52,66 +52,88 @@ export default function EmptyState({
   onStartNewChat,
   onOpenSettings,
   onSelectPrompt,
+  onUploadDocument,
 }: EmptyStateProps) {
+  const howItWorks = [
+    {
+      step: "01",
+      title: "Upload Any File",
+      desc: "Drag and drop your PDF, Word document, spreadsheet, or report.",
+      icon: <Upload size={18} strokeWidth={2.2} color="#FFFFFF" />,
+    },
+    {
+      step: "02",
+      title: "Ask in Plain English",
+      desc: "Ask any question, request a summary, or pick a starter prompt below.",
+      icon: <MessageSquare size={18} strokeWidth={2.2} color="#FFFFFF" />,
+    },
+    {
+      step: "03",
+      title: "Get Instant Answers",
+      desc: "Receive clear explanations with direct page references so you can verify facts.",
+      icon: <CheckCircle2 size={18} strokeWidth={2.2} color="#FFFFFF" />,
+    },
+  ];
+
   const quickSparks = [
     {
-      title: "Executive Synthesis",
-      prompt: "Provide an executive summary highlighting the top 5 core takeaways, strategic impacts, and key metrics from the context.",
+      title: "Quick 5-Point Summary",
+      prompt: "Provide a quick 5-bullet summary highlighting the main takeaways and essential findings.",
+      icon: <FileText size={14} color="#FFFFFF" />,
+    },
+    {
+      title: "Explain in Simple Terms",
+      prompt: "Explain the main ideas and conclusions in clear, simple language that anyone can easily understand.",
       icon: <Sparkles size={14} color="#FFFFFF" />,
     },
     {
-      title: "Risk & Compliance Audit",
-      prompt: "Identify any risk factors, regulatory obligations, and compliance caveats mentioned in the documents.",
-      icon: <ShieldCheck size={14} color="#FFFFFF" />,
-    },
-    {
       title: "Action Items & Deadlines",
-      prompt: "Extract all actionable decisions, milestones, responsibilities, and timeline deadlines from the context.",
-      icon: <Zap size={14} color="#FFFFFF" />,
+      prompt: "Extract all key decisions, action items, assigned owners, and upcoming deadlines.",
+      icon: <CheckCircle2 size={14} color="#FFFFFF" />,
     },
     {
-      title: "Cross-Topic Q&A",
-      prompt: "Compare and contrast the primary findings across different sections, incorporating past conversation insights.",
-      icon: <Cpu size={14} color="#FFFFFF" />,
+      title: "Key Facts & Numbers",
+      prompt: "Find and list the most important facts, numbers, dates, and statistics mentioned.",
+      icon: <Search size={14} color="#FFFFFF" />,
     },
   ];
 
   const features = [
     {
       icon: <Layers size={18} strokeWidth={2} color="#FFFFFF" />,
-      title: "Session-Scoped Documents",
-      desc: "Upload PDFs, DOCX, TXT, MD, CSV, or XLSX isolated specifically to this conversation.",
-      tag: "Data Isolation",
+      title: "Works with Any Document",
+      desc: "Supports PDFs, Word docs, Excel spreadsheets, and text notes with one click.",
+      tag: "All Formats",
     },
     {
-      icon: <Database size={18} strokeWidth={2} color="#FFFFFF" />,
-      title: "Global Cross-Session Memory",
-      desc: "Recalls relevant conclusions, answers, and facts from previous chats automatically.",
-      tag: "Continuous Learning",
+      icon: <CheckCircle2 size={18} strokeWidth={2} color="#FFFFFF" />,
+      title: "Verified Page Citations",
+      desc: "Every answer links directly to the exact page and paragraph so you can verify facts.",
+      tag: "100% Sourced",
     },
     {
-      icon: <Search size={18} strokeWidth={2} color="#FFFFFF" />,
-      title: "Hierarchical RAG Chunking",
-      desc: "Parent-child semantic chunks (~512 & ~128 tokens) with contextual metadata headers.",
-      tag: "Context Preservation",
+      icon: <FileText size={18} strokeWidth={2} color="#FFFFFF" />,
+      title: "Effortless Summaries",
+      desc: "Turn 50-page reports and complex contracts into clear, structured takeaways in seconds.",
+      tag: "Time-Saving",
     },
     {
-      icon: <BarChart3 size={18} strokeWidth={2} color="#FFFFFF" />,
-      title: "Hybrid BM25 + Dense RRF",
-      desc: "Reciprocal Rank Fusion merges exact keyword matching with dense neural embeddings.",
-      tag: "Dual Retrieval",
+      icon: <Brain size={18} strokeWidth={2} color="#FFFFFF" />,
+      title: "Connected Conversation",
+      desc: "DocMind remembers past discussions in your workspace so you never have to repeat context.",
+      tag: "Smart Memory",
     },
     {
-      icon: <Cpu size={18} strokeWidth={2} color="#FFFFFF" />,
-      title: "Cross-Encoder Joint Reranker",
-      desc: "High-precision cross-attention scoring on candidate pairs for optimal relevance.",
-      tag: "Precision Scoring",
+      icon: <Zap size={18} strokeWidth={2} color="#FFFFFF" />,
+      title: "Fast & Responsive",
+      desc: "Get smooth real-time streaming answers and quick insights without delays.",
+      tag: "Instant",
     },
     {
-      icon: <RefreshCw size={18} strokeWidth={2} color="#FFFFFF" />,
-      title: "Multi-LLM Auto Failover",
-      desc: "Cascades seamlessly across Gemini → Groq → OpenRouter on rate limits or quotas.",
-      tag: "Zero Downtime",
+      icon: <ShieldCheck size={18} strokeWidth={2} color="#FFFFFF" />,
+      title: "Private & Secure",
+      desc: "Your files remain strictly private to your session and are never shared publicly.",
+      tag: "Protected",
     },
   ];
 
@@ -135,6 +157,7 @@ export default function EmptyState({
           whileTap={{ scale: 0.92 }}
           transition={{ type: "spring", stiffness: 400, damping: 20 }}
           onClick={onStartNewChat}
+          title="Start a new conversation"
         >
           <Brain size={36} strokeWidth={2.2} color="#FFFFFF" />
         </motion.div>
@@ -147,16 +170,16 @@ export default function EmptyState({
         transition={{ type: "spring", stiffness: 400, damping: 25 }}
       >
         <Sparkles size={12} color="#FFFFFF" />
-        <span>Next-Gen Neural Document Intelligence</span>
+        <span>AI Reading &amp; Document Assistant</span>
       </motion.div>
 
       <motion.h1 variants={itemVariants} className="empty-state-title">
-        High-Precision Document Intelligence <br />
-        <span className="empty-state-title-highlight">&amp; Global Cross-Chat Memory</span>
+        Chat with your documents. <br />
+        <span className="empty-state-title-highlight">Get instant answers in seconds.</span>
       </motion.h1>
 
       <motion.p variants={itemVariants} className="empty-state-description">
-        Upload contracts, research papers, or spreadsheets for instant semantic Q&amp;A. DocMind seamlessly synthesizes document context while retaining memory across all your conversations.
+        Upload any PDF, Word file, or spreadsheet to ask questions, get quick summaries, and extract key facts. DocMind makes complex reading fast and easy for everyone.
       </motion.p>
 
       {/* Main Action Buttons */}
@@ -169,9 +192,22 @@ export default function EmptyState({
           transition={{ type: "spring", stiffness: 400, damping: 20 }}
         >
           <MessageSquare size={15} color="#000000" />
-          <span>Start New Conversation</span>
+          <span>Start a Conversation</span>
           <ArrowRight size={14} color="#000000" style={{ marginLeft: 2 }} />
         </motion.button>
+
+        {onUploadDocument && (
+          <motion.button
+            className="btn btn-outline"
+            onClick={onUploadDocument}
+            whileHover={{ scale: 1.04, y: -2 }}
+            whileTap={{ scale: 0.95 }}
+            transition={{ type: "spring", stiffness: 400, damping: 20 }}
+          >
+            <Upload size={14} color="#FFFFFF" />
+            <span>Upload Document</span>
+          </motion.button>
+        )}
 
         <motion.button
           className="btn btn-outline"
@@ -179,17 +215,79 @@ export default function EmptyState({
           whileHover={{ scale: 1.04, y: -2 }}
           whileTap={{ scale: 0.95 }}
           transition={{ type: "spring", stiffness: 400, damping: 20 }}
+          style={{
+            border: "1px solid rgba(255, 255, 255, 0.15)",
+            color: "var(--text-secondary)",
+          }}
+          title="Settings and preferences"
         >
-          <Cpu size={14} color="#FFFFFF" />
-          <span>Configure Multi-LLM Keys</span>
+          <Sliders size={13} color="var(--text-secondary)" />
+          <span>Settings</span>
         </motion.button>
+      </motion.div>
+
+      {/* Quick Upload Drop Card */}
+      {onUploadDocument && (
+        <motion.div
+          variants={itemVariants}
+          className="landing-dropzone"
+          onClick={onUploadDocument}
+          whileHover={{
+            scale: 1.01,
+            borderColor: "rgba(255, 255, 255, 0.4)",
+            boxShadow: "0 10px 30px rgba(0, 0, 0, 0.6)",
+          }}
+          whileTap={{ scale: 0.99 }}
+          transition={{ type: "spring", stiffness: 400, damping: 25 }}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              onUploadDocument();
+            }
+          }}
+          title="Click to select a document to upload"
+        >
+          <div className="landing-dropzone-icon">
+            <Upload size={20} color="#FFFFFF" />
+          </div>
+          <div className="landing-dropzone-text">
+            <div className="landing-dropzone-title">Drop a file here to get started, or browse</div>
+            <div className="landing-dropzone-subtitle">Supports PDF, Word, Excel, and text files</div>
+          </div>
+        </motion.div>
+      )}
+
+      {/* How It Works Section */}
+      <motion.div variants={itemVariants} className="how-it-works-section">
+        <div className="how-it-works-header">
+          <span>How It Works</span>
+        </div>
+        <div className="how-it-works-grid">
+          {howItWorks.map((item, idx) => (
+            <motion.div
+              key={idx}
+              className="how-it-works-card"
+              whileHover={{ y: -3, borderColor: "rgba(255, 255, 255, 0.3)" }}
+              transition={{ type: "spring", stiffness: 350, damping: 25 }}
+            >
+              <div className="how-it-works-card-top">
+                <span className="how-it-works-step-badge">{item.step}</span>
+                <div className="how-it-works-icon-wrapper">{item.icon}</div>
+              </div>
+              <div className="how-it-works-title">{item.title}</div>
+              <div className="how-it-works-desc">{item.desc}</div>
+            </motion.div>
+          ))}
+        </div>
       </motion.div>
 
       {/* Quick Prompt Sparks */}
       <motion.div variants={itemVariants} className="prompt-sparks-section">
         <div className="prompt-sparks-header">
           <Sparkles size={12} color="#FFFFFF" />
-          <span>Quick Prompt Sparks</span>
+          <span>Starter Questions to Try</span>
         </div>
         <div className="prompt-sparks-grid">
           {quickSparks.map((spark, idx) => (
@@ -225,7 +323,7 @@ export default function EmptyState({
 
       {/* Feature Grid */}
       <motion.div variants={itemVariants} className="feature-grid-header">
-        <span>Architectural Capabilities</span>
+        <span>Why You&apos;ll Love DocMind</span>
       </motion.div>
       <motion.div variants={itemVariants} className="feature-grid">
         {features.map((f, i) => (

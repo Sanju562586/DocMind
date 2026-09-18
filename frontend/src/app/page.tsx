@@ -1563,7 +1563,7 @@ export default function HomePage() {
                 onClick={() => setModal("settings")}
                 whileHover={{ scale: 1.08 }}
                 whileTap={{ scale: 0.92 }}
-                title="Configure Multi-LLM API Keys"
+                title="Settings & AI Models"
                 aria-label="Settings"
               >
                 <Cpu size={15} />
@@ -1685,7 +1685,7 @@ export default function HomePage() {
                         No Documents Attached to This Conversation
                       </div>
                       <p style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.6, marginBottom: 20 }}>
-                        Attach PDF, DOCX, TXT, CSV, or XLSX files to activate hierarchical hybrid retrieval, or chat freely with continuous cross-session memory.
+                        Attach any document (PDF, Word, Excel, or text) to ask questions, or start typing below to chat freely.
                       </p>
                       <motion.button
                         className="btn btn-primary"
@@ -1942,6 +1942,7 @@ export default function HomePage() {
                 onStartNewChat={handleNewChat}
                 onOpenSettings={() => setModal("settings")}
                 onSelectPrompt={handleStartWithPrompt}
+                onUploadDocument={handleOpenUploadModal}
               />
             </div>
           )}

@@ -1889,6 +1889,146 @@ body {
   margin-top: 4px;
 }
 
+/* ── Landing Page Quick Dropzone ── */
+.landing-dropzone {
+  width: 100%;
+  max-width: 580px;
+  margin: 6px auto 0;
+  padding: 14px 20px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px dashed rgba(255, 255, 255, 0.22);
+  border-radius: var(--radius-lg);
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  cursor: pointer;
+  backdrop-filter: blur(12px);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  text-align: left;
+}
+
+.landing-dropzone:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.45);
+}
+
+.landing-dropzone-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.landing-dropzone-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.landing-dropzone-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #FFFFFF;
+}
+
+.landing-dropzone-subtitle {
+  font-size: 11.5px;
+  color: var(--text-muted-alt);
+}
+
+/* ── How It Works Section ── */
+.how-it-works-section {
+  width: 100%;
+  margin-top: 10px;
+}
+
+.how-it-works-header {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--text-muted-alt);
+  margin-bottom: 12px;
+}
+
+.how-it-works-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  width: 100%;
+}
+
+@media (max-width: 768px) {
+  .how-it-works-grid {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+}
+
+.how-it-works-card {
+  padding: 16px 18px;
+  background: #0A0A0A;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  text-align: left;
+  backdrop-filter: blur(16px);
+  box-shadow: var(--shadow-sm);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.how-it-works-card:hover {
+  background: #111111;
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.how-it-works-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.how-it-works-step-badge {
+  font-size: 11px;
+  font-weight: 800;
+  color: rgba(255, 255, 255, 0.4);
+  letter-spacing: 0.5px;
+}
+
+.how-it-works-icon-wrapper {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: #FFFFFF;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.how-it-works-title {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: #FFFFFF;
+  margin-bottom: 4px;
+}
+
+.how-it-works-desc {
+  font-size: 11.5px;
+  color: var(--text-muted-alt);
+  line-height: 1.5;
+}
+
 .prompt-sparks-section {
   width: 100%;
   margin-top: 14px;
