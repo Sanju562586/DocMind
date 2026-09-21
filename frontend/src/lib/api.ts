@@ -633,8 +633,10 @@ export async function sendMessage(
 
       for (const line of lines) {
         if (!line.startsWith("data: ")) continue;
+        const dataStr = line.slice(6).trim();
+        if (!dataStr) continue;
         try {
-          const event = JSON.parse(line.slice(6));
+          const event = JSON.parse(dataStr);
           if (event.type === "token") callbacks.onToken(event.content);
           else if (event.type === "reset") callbacks.onReset?.();
           else if (event.type === "sources") callbacks.onSources?.(event.sources);
@@ -701,8 +703,10 @@ export async function summarizeSession(
       buf = lines.pop() ?? "";
       for (const line of lines) {
         if (!line.startsWith("data: ")) continue;
+        const dataStr = line.slice(6).trim();
+        if (!dataStr) continue;
         try {
-          const ev = JSON.parse(line.slice(6));
+          const ev = JSON.parse(dataStr);
           if (ev.type === "token") callbacks.onToken(ev.content);
           else if (ev.type === "reset") callbacks.onReset?.();
           else if (ev.type === "done") callbacks.onDone();
@@ -783,8 +787,10 @@ export async function compareDocuments(
       buf = lines.pop() ?? "";
       for (const line of lines) {
         if (!line.startsWith("data: ")) continue;
+        const dataStr = line.slice(6).trim();
+        if (!dataStr) continue;
         try {
-          const ev = JSON.parse(line.slice(6));
+          const ev = JSON.parse(dataStr);
           if (ev.type === "token") callbacks.onToken(ev.content);
           else if (ev.type === "reset") callbacks.onReset?.();
           else if (ev.type === "done") callbacks.onDone();

@@ -44,6 +44,8 @@ yarn-error.log*
 .pnpm-debug.log*
 *.tsbuildinfo
 frontend/next-env.d.ts
+frontend/AGENTS.md
+frontend/CLAUDE.md
 
 # ==========================================
 # Database & Storage

@@ -148,11 +148,19 @@ async function handleProxy(
       responseHeaders.set(key, val);
     });
 
-    if (isSSE) {
+    if (isSSE && res.body) {
       responseHeaders.set("Content-Type", "text/event-stream; charset=utf-8");
       responseHeaders.set("Cache-Control", "no-cache, no-transform");
       responseHeaders.set("Connection", "keep-alive");
       responseHeaders.set("X-Accel-Buffering", "no");
+
+      const { readable, writable } = new TransformStream();
+      res.body.pipeTo(writable).catch(() => {});
+      return new Response(readable, {
+        status: res.status,
+        statusText: res.statusText,
+        headers: responseHeaders,
+      });
     }
 
     return new Response(res.body, {

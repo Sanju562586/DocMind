@@ -100,5 +100,7 @@ export function preprocessMarkdown(content: string): string {
     processed = processed.replace(`___DOCMIND_CODE_BLOCK_${i}___`, block);
   });
 
-  return processed.trim();
+  const hasTrailingSpace = /\s$/.test(content);
+  const trimmed = processed.trim();
+  return hasTrailingSpace ? `${trimmed} ` : trimmed;
 }
