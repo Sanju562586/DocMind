@@ -51,9 +51,9 @@ class Settings(BaseSettings):
     openrouter_api_key: Optional[str] = None
 
     # Model names
-    gemini_model: str = "gemini-2.0-flash"
-    groq_model: str = "llama-3.3-70b-versatile"
-    openrouter_model: str = "anthropic/claude-3.5-haiku"
+    gemini_model: str = "gemini-3.1-flash-lite"
+    groq_model: str = "openai/gpt-oss-120b"
+    openrouter_model: str = "meta-llama/llama-3.3-70b-instruct"
 
     # Server config
     host: str = "127.0.0.1"

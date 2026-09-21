@@ -1,16 +1,31 @@
 """
-Multi-LLM Router with Automatic Fallback & Failover
-────────────────────────────────────────────────────
-Priority:  Gemini  →  Groq  →  OpenRouter
-On error (429 Rate Limit, 500, Quota exceeded, Timeout) → automatically tries next provider.
-Supports streaming via async generators.
+Multi-LLM Router with Real-Time Streaming & Automatic Failover
+─────────────────────────────────────────────────────────────
+Providers: Groq (ultra-fast sub-second streaming) ↔ Gemini ↔ OpenRouter
+Includes:
+- Force IPv4 resolution to prevent 21-second Windows IPv6 DNS connection hangs.
+- Native async HTTP Server-Sent Events (SSE) streaming for all providers.
+- Smooth word-level token streaming so answers stream in real time instead of dumping whole blocks.
+- Automatic mid-stream reset and failover on errors, rate limits, or timeouts.
 """
 
 import asyncio
 import json
 import logging
+import os
+import re
+import socket
 from abc import ABC, abstractmethod
 from typing import AsyncGenerator, List, Dict, Optional
+
+# Force IPv4 socket resolution on Windows to eliminate 21-second IPv6 connection hangs
+try:
+    _orig_getaddrinfo = socket.getaddrinfo
+    def _ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+    socket.getaddrinfo = _ipv4_getaddrinfo
+except Exception:
+    pass
 
 import httpx
 
@@ -32,37 +47,32 @@ class LLMProvider(ABC):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Gemini Provider
+# Gemini Provider (Native Async REST SSE Streaming with Word-Level Smoothing)
 # ──────────────────────────────────────────────────────────────────────────────
 
 class GeminiProvider(LLMProvider):
     name = "gemini"
     candidate_models = [
-        "gemini-3.8-flash",
-        "gemini-3.7-flash",
-        "gemini-3.6-flash",
-        "gemini-3.5-flash",
-        "gemini-3.5-flash-lite",
         "gemini-3.1-flash-lite",
-        "gemini-2.5-flash",
-        "gemini-2.5-flash-lite",
-        "gemini-flash-latest",
-        "gemini-flash-lite-latest",
-        "gemini-2.0-flash",
-        "gemini-2.0-flash-lite",
-        "gemini-1.5-flash",
-        "gemini-2.5-pro",
-        "gemini-1.5-pro",
+        "gemini-3.5-flash-lite",
+        "gemini-3.8-flash",
+        "gemini-3.6-flash",
     ]
 
     async def stream(
         self, messages: List[Dict], api_key: str, model: Optional[str] = None
     ) -> AsyncGenerator[str, None]:
         key = api_key.strip()
-        models_to_try = [model] if model else []
+        models_to_try: List[str] = []
+        if model and model.strip():
+            clean_m = model.strip().replace("models/", "")
+            models_to_try.append(clean_m)
         for m in self.candidate_models:
             if m not in models_to_try:
                 models_to_try.append(m)
+
+        # Limit to at most 2 candidate models so failover to next provider is fast
+        models_to_try = models_to_try[:2]
 
         system_msg = next((m["content"] for m in messages if m["role"] == "system"), None)
         raw_chat = [m for m in messages if m["role"] != "system"]
@@ -95,108 +105,32 @@ class GeminiProvider(LLMProvider):
         if chat_messages[-1]["role"] != "user":
             chat_messages.append({"role": "user", "content": "Please continue."})
 
+        contents = []
+        for msg in chat_messages:
+            contents.append({"role": msg["role"], "parts": [{"text": msg["content"]}]})
+
+        payload: Dict = {
+            "contents": contents,
+            "generationConfig": {
+                "temperature": 0.7,
+                "maxOutputTokens": 3072,
+            },
+        }
+        if system_msg:
+            payload["systemInstruction"] = {"parts": [{"text": system_msg}]}
+
         last_exc = None
         for m_name in models_to_try:
-            # 1. Try google.generativeai SDK first if available
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{m_name}:streamGenerateContent?alt=sse&key={key}"
+            yielded_any = False
             try:
-                import google.generativeai as genai
-                genai.configure(api_key=key)
-                genai_model = genai.GenerativeModel(
-                    m_name,
-                    system_instruction=system_msg,
-                )
-
-                history = []
-                for msg in chat_messages[:-1]:
-                    history.append({"role": msg["role"], "parts": [msg["content"]]})
-
-                last_user_msg = chat_messages[-1]["content"]
-
-                # Run sync SDK stream in thread-safe generator
-                queue: asyncio.Queue = asyncio.Queue()
-                loop = asyncio.get_running_loop()
-
-                def _producer():
-                    try:
-                        chat = genai_model.start_chat(history=history)
-                        response = chat.send_message(
-                            last_user_msg,
-                            stream=True,
-                            generation_config=genai.GenerationConfig(
-                                temperature=0.7,
-                                max_output_tokens=3072,
-                            ),
-                        )
-                        for chunk in response:
-                            try:
-                                if chunk.text:
-                                    loop.call_soon_threadsafe(queue.put_nowait, chunk.text)
-                            except Exception:
-                                if hasattr(chunk, "candidates") and chunk.candidates:
-                                    for part in chunk.candidates[0].content.parts:
-                                        if hasattr(part, "text") and part.text:
-                                            loop.call_soon_threadsafe(queue.put_nowait, part.text)
-                    except Exception as exc:
-                        loop.call_soon_threadsafe(queue.put_nowait, exc)
-                    finally:
-                        loop.call_soon_threadsafe(queue.put_nowait, None)
-
-                loop.run_in_executor(None, _producer)
-
-                yielded_any = False
-                while True:
-                    item = await queue.get()
-                    if item is None:
-                        break
-                    if isinstance(item, Exception):
-                        raise item
-                    yielded_any = True
-                    yield item
-
-                if yielded_any:
-                    return
-
-            except Exception as exc:
-                last_exc = exc
-                err_str = str(exc).lower()
-                is_capacity_or_quota = any(
-                    sig in err_str
-                    for sig in ["503", "high demand", "temporarily", "unavailable", "429", "quota", "resourceexhausted", "not found", "404"]
-                )
-                if yielded_any:
-                    logger.warning("Gemini SDK model %s failed mid-stream after emitting tokens: %s. Emitting stream reset...", m_name, exc)
-                    yield LLM_STREAM_RESET
-                    yielded_any = False
-
-                if is_capacity_or_quota:
-                    logger.warning("Gemini model %s hit capacity/quota limit (%s). Bypassing REST and immediately trying next candidate model...", m_name, exc)
-                    continue
-
-                logger.warning("Gemini SDK model %s failed: %s. Trying REST API fallback...", m_name, exc)
-
-            # 2. Direct HTTP REST API streaming fallback
-            try:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{m_name}:streamGenerateContent?alt=sse&key={key}"
-                contents = []
-                for msg in chat_messages:
-                    contents.append({"role": msg["role"], "parts": [{"text": msg["content"]}]})
-
-                payload: Dict = {
-                    "contents": contents,
-                    "generationConfig": {
-                        "temperature": 0.7,
-                        "maxOutputTokens": 3072,
-                    },
-                }
-                if system_msg:
-                    payload["systemInstruction"] = {"parts": [{"text": system_msg}]}
-
-                yielded_any = False
-                async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
+                # Lean connect & read timeouts so slow or dead models fail over quickly
+                async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0, read=15.0, write=5.0, pool=5.0)) as client:
                     async with client.stream("POST", url, json=payload) as resp:
                         if resp.status_code != 200:
                             err_body = await resp.aread()
-                            raise RuntimeError(f"HTTP {resp.status_code}: {err_body.decode('utf-8', errors='ignore')[:200]}")
+                            err_text = err_body.decode("utf-8", errors="ignore")[:300]
+                            raise RuntimeError(f"Gemini HTTP {resp.status_code}: {err_text}")
 
                         async for line in resp.aiter_lines():
                             if not line.startswith("data: "):
@@ -210,9 +144,16 @@ class GeminiProvider(LLMProvider):
                                 if candidates:
                                     parts = candidates[0].get("content", {}).get("parts", [])
                                     for part in parts:
-                                        if "text" in part and part["text"]:
-                                            yielded_any = True
-                                            yield part["text"]
+                                        text_segment = part.get("text", "")
+                                        if text_segment:
+                                            # Split larger blocks into natural word tokens with micro-delays
+                                            # to give the user a smooth real-time stream instead of large jumps
+                                            tokens = re.findall(r"\S+|\s+", text_segment)
+                                            for tok in tokens:
+                                                yielded_any = True
+                                                yield tok
+                                                if len(tokens) > 2:
+                                                    await asyncio.sleep(0.01)
                             except Exception:
                                 pass
 
@@ -222,10 +163,10 @@ class GeminiProvider(LLMProvider):
             except Exception as exc:
                 last_exc = exc
                 if yielded_any:
-                    logger.warning("Gemini REST model %s failed mid-stream after emitting tokens: %s. Emitting stream reset...", m_name, exc)
+                    logger.warning("Gemini model %s failed mid-stream: %s. Emitting stream reset...", m_name, exc)
                     yield LLM_STREAM_RESET
                     yielded_any = False
-                logger.warning("Gemini REST model %s failed: %s. Trying next candidate model...", m_name, exc)
+                logger.warning("Gemini model %s failed: %s. Trying fallback...", m_name, exc)
                 continue
 
         if last_exc:
@@ -233,7 +174,7 @@ class GeminiProvider(LLMProvider):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Groq Provider (Native Async HTTP Streaming to bypass proxies issue)
+# Groq Provider (Native Async HTTP Streaming with Sub-Second First Token)
 # ──────────────────────────────────────────────────────────────────────────────
 
 class GroqProvider(LLMProvider):
@@ -241,20 +182,24 @@ class GroqProvider(LLMProvider):
     candidate_models = [
         "openai/gpt-oss-120b",
         "openai/gpt-oss-20b",
-        "qwen/qwen3.6-27b",
-        "llama-3.3-70b-versatile",
-        "llama-3.1-70b-versatile",
-        "llama-3.1-8b-instant",
+        "qwen/qwen3.8-27b",
+        "groq/compound",
     ]
 
     async def stream(
         self, messages: List[Dict], api_key: str, model: Optional[str] = None
     ) -> AsyncGenerator[str, None]:
         key = api_key.strip()
-        models_to_try = [model] if model else []
+        models_to_try: List[str] = []
+        if model and model.strip():
+            clean_m = model.strip()
+            models_to_try.append(clean_m)
         for m in self.candidate_models:
             if m not in models_to_try:
                 models_to_try.append(m)
+
+        # Limit to at most 2 candidate models
+        models_to_try = models_to_try[:2]
 
         last_exc = None
         for m_name in models_to_try:
@@ -272,7 +217,7 @@ class GroqProvider(LLMProvider):
                 }
 
                 yielded_any = False
-                async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0, read=25.0, write=5.0, pool=5.0)) as client:
                     async with client.stream(
                         "POST",
                         "https://api.groq.com/openai/v1/chat/completions",
@@ -281,7 +226,8 @@ class GroqProvider(LLMProvider):
                     ) as resp:
                         if resp.status_code != 200:
                             err_body = await resp.aread()
-                            raise RuntimeError(f"Groq HTTP {resp.status_code}: {err_body.decode('utf-8', errors='ignore')[:200]}")
+                            err_text = err_body.decode("utf-8", errors="ignore")[:300]
+                            raise RuntimeError(f"Groq HTTP {resp.status_code}: {err_text}")
 
                         async for line in resp.aiter_lines():
                             if not line.startswith("data: "):
@@ -294,9 +240,10 @@ class GroqProvider(LLMProvider):
                                 choices = chunk_json.get("choices")
                                 if choices and len(choices) > 0:
                                     delta = choices[0].get("delta", {})
-                                    if "content" in delta and delta["content"]:
+                                    content = delta.get("content", "")
+                                    if content:
                                         yielded_any = True
-                                        yield delta["content"]
+                                        yield content
                             except Exception:
                                 pass
 
@@ -305,10 +252,10 @@ class GroqProvider(LLMProvider):
             except Exception as exc:
                 last_exc = exc
                 if yielded_any:
-                    logger.warning("Groq model %s failed mid-stream after yielding tokens: %s. Emitting stream reset...", m_name, exc)
+                    logger.warning("Groq model %s failed mid-stream: %s. Emitting stream reset...", m_name, exc)
                     yield LLM_STREAM_RESET
                     yielded_any = False
-                logger.warning("Groq model %s failed: %s. Trying next candidate model...", m_name, exc)
+                logger.warning("Groq model %s failed: %s. Trying fallback model...", m_name, exc)
                 continue
 
         if last_exc:
@@ -316,29 +263,31 @@ class GroqProvider(LLMProvider):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# OpenRouter Provider (Native Async HTTP Streaming to bypass proxies issue)
+# OpenRouter Provider (Native Async HTTP Streaming)
 # ──────────────────────────────────────────────────────────────────────────────
 
 class OpenRouterProvider(LLMProvider):
     name = "openrouter"
     candidate_models = [
-        "anthropic/claude-3.5-haiku",
         "meta-llama/llama-3.3-70b-instruct",
-        "google/gemini-2.0-flash-001",
-        "google/gemini-flash-1.5",
+        "openai/gpt-4o-mini",
+        "google/gemini-2.5-flash",
         "mistralai/mistral-large-2407",
-        "qwen/qwen-2.5-72b-instruct",
-        "anthropic/claude-3-haiku",
     ]
 
     async def stream(
         self, messages: List[Dict], api_key: str, model: Optional[str] = None
     ) -> AsyncGenerator[str, None]:
         key = api_key.strip()
-        models_to_try = [model] if model else []
+        models_to_try: List[str] = []
+        if model and model.strip():
+            clean_m = model.strip()
+            models_to_try.append(clean_m)
         for m in self.candidate_models:
             if m not in models_to_try:
                 models_to_try.append(m)
+
+        models_to_try = models_to_try[:2]
 
         last_exc = None
         for m_name in models_to_try:
@@ -358,7 +307,7 @@ class OpenRouterProvider(LLMProvider):
                 }
 
                 yielded_any = False
-                async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0, read=25.0, write=5.0, pool=5.0)) as client:
                     async with client.stream(
                         "POST",
                         "https://openrouter.ai/api/v1/chat/completions",
@@ -367,7 +316,8 @@ class OpenRouterProvider(LLMProvider):
                     ) as resp:
                         if resp.status_code != 200:
                             err_body = await resp.aread()
-                            raise RuntimeError(f"OpenRouter HTTP {resp.status_code}: {err_body.decode('utf-8', errors='ignore')[:200]}")
+                            err_text = err_body.decode("utf-8", errors="ignore")[:300]
+                            raise RuntimeError(f"OpenRouter HTTP {resp.status_code}: {err_text}")
 
                         async for line in resp.aiter_lines():
                             if not line.startswith("data: "):
@@ -380,9 +330,10 @@ class OpenRouterProvider(LLMProvider):
                                 choices = chunk_json.get("choices")
                                 if choices and len(choices) > 0:
                                     delta = choices[0].get("delta", {})
-                                    if "content" in delta and delta["content"]:
+                                    content = delta.get("content", "")
+                                    if content:
                                         yielded_any = True
-                                        yield delta["content"]
+                                        yield content
                             except Exception:
                                 pass
 
@@ -391,10 +342,10 @@ class OpenRouterProvider(LLMProvider):
             except Exception as exc:
                 last_exc = exc
                 if yielded_any:
-                    logger.warning("OpenRouter model %s failed mid-stream after yielding tokens: %s. Emitting stream reset...", m_name, exc)
+                    logger.warning("OpenRouter model %s failed mid-stream: %s. Emitting stream reset...", m_name, exc)
                     yield LLM_STREAM_RESET
                     yielded_any = False
-                logger.warning("OpenRouter model %s failed: %s. Trying next candidate model...", m_name, exc)
+                logger.warning("OpenRouter model %s failed: %s. Trying fallback model...", m_name, exc)
                 continue
 
         if last_exc:
@@ -402,16 +353,27 @@ class OpenRouterProvider(LLMProvider):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Router (with automatic multi-provider fallback)
+# Router (with Dynamic Fast-Path Prioritization & Multi-Provider Fallback)
 # ──────────────────────────────────────────────────────────────────────────────
 
 class LLMRouter:
     def __init__(self):
-        self._providers: List[LLMProvider] = [
-            GeminiProvider(),
-            GroqProvider(),
-            OpenRouterProvider(),
-        ]
+        self._groq = GroqProvider()
+        self._gemini = GeminiProvider()
+        self._openrouter = OpenRouterProvider()
+
+    def _get_providers_order(self, groq_key: Optional[str], gemini_key: Optional[str]) -> List[LLMProvider]:
+        """
+        Dynamically prioritize Groq for lightning-fast sub-second token streaming when available,
+        falling back seamlessly to Gemini and OpenRouter.
+        """
+        if groq_key and groq_key.strip():
+            # Groq is ultra-fast (<1s first token response)
+            return [self._groq, self._gemini, self._openrouter]
+        elif gemini_key and gemini_key.strip():
+            return [self._gemini, self._groq, self._openrouter]
+        else:
+            return [self._openrouter, self._groq, self._gemini]
 
     async def stream(
         self,
@@ -435,17 +397,18 @@ class LLMRouter:
             "openrouter": openrouter_model,
         }
 
+        providers = self._get_providers_order(groq_key, gemini_key)
         errors: List[str] = []
 
-        for provider in self._providers:
+        for provider in providers:
             api_key = key_map.get(provider.name)
             if not api_key or not api_key.strip():
                 logger.debug("Skipping provider %s (no API key supplied)", provider.name)
                 continue
 
+            token_count = 0
             try:
                 logger.info("Attempting LLM provider: %s", provider.name)
-                token_count = 0
                 async for token in provider.stream(
                     messages, api_key, model=model_map.get(provider.name)
                 ):
@@ -455,14 +418,15 @@ class LLMRouter:
                         continue
                     token_count += 1
                     yield token
-                logger.info("Provider %s succeeded (%d tokens)", provider.name, token_count)
+
+                logger.info("Provider %s succeeded (%d tokens streamed)", provider.name, token_count)
                 return
 
             except Exception as exc:
-                err_msg = f"{provider.name}: {type(exc).__name__}: {str(exc)[:120]}"
+                err_msg = f"{provider.name}: {type(exc).__name__}: {str(exc)[:150]}"
                 if token_count > 0:
                     logger.warning(
-                        "Provider %s failed mid-stream after emitting %d tokens: %s. Emitting reset and attempting next fallback provider...",
+                        "Provider %s failed mid-stream after emitting %d tokens: %s. Emitting reset and attempting fallback...",
                         provider.name, token_count, err_msg
                     )
                     yield LLM_STREAM_RESET
@@ -472,7 +436,6 @@ class LLMRouter:
                 errors.append(err_msg)
                 continue
 
-        # If all available providers failed
         error_details = "\n".join(f"- {e}" for e in errors) if errors else "No valid API keys configured."
         raise RuntimeError(f"All LLM providers failed:\n{error_details}\n\nPlease verify your API keys or rate limits in Settings.")
 
@@ -502,4 +465,3 @@ class LLMRouter:
                 continue
             tokens.append(token)
         return "".join(tokens)
-

@@ -7,16 +7,17 @@ _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 
 
 class ChatRequest(BaseModel):
-    session_id: str = Field(..., min_length=36, max_length=36)
+    session_id: str = Field(..., min_length=1, max_length=120)
     message: str = Field(..., min_length=1, max_length=8_000)
     use_global_memory: bool = Field(default=True)
 
     @field_validator("session_id")
     @classmethod
     def validate_session_id(cls, v: str) -> str:
-        if not _UUID_RE.match(v):
-            raise ValueError("session_id must be a valid UUID")
-        return v
+        s = v.strip()
+        if not s:
+            raise ValueError("session_id cannot be blank")
+        return s
 
     @field_validator("message")
     @classmethod

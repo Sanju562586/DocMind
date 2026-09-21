@@ -17,6 +17,16 @@ backend_dir = os.path.dirname(os.path.abspath(__file__))
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
+import socket
+# Force IPv4 resolution to eliminate 21-second IPv6 connection hangs on Windows
+try:
+    _orig_getaddrinfo = socket.getaddrinfo
+    def _ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+    socket.getaddrinfo = _ipv4_getaddrinfo
+except Exception:
+    pass
+
 import time
 import aiofiles
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, Query, BackgroundTasks, status
@@ -981,6 +991,9 @@ async def chat(request: Request, body: ChatRequest):
 
     session = store.get_session(body.session_id, user_id=user["user_id"])
     if not session:
+        store.ensure_session(body.session_id, title="New Conversation", user_id=user["user_id"])
+        session = store.get_session(body.session_id, user_id=user["user_id"])
+    if not session:
         raise HTTPException(status_code=404, detail="Session not found or unauthorized")
 
     query = body.message.strip()
@@ -1161,6 +1174,9 @@ async def summarize_session(session_id: str, request: Request):
         raise HTTPException(status_code=400, detail="No API keys configured.")
 
     session = store.get_session(session_id, user_id=user["user_id"])
+    if not session:
+        store.ensure_session(session_id, title="New Conversation", user_id=user["user_id"])
+        session = store.get_session(session_id, user_id=user["user_id"])
     if not session:
         raise HTTPException(status_code=404, detail="Session not found or unauthorized")
 
