@@ -191,32 +191,41 @@ class HierarchicalSemanticChunker:
     @staticmethod
     def _detect_section_header(page_text: str, page_num: Optional[int] = None) -> str:
         """
-        Intelligently extract the title or problem statement header from page/section text.
+        Extract the title or section heading from a page or section across any document domain
+        (e.g., reports, research papers, legal agreements, technical manuals, specifications, presentations, forms).
         """
         lines = [line.strip() for line in page_text.splitlines() if line.strip()]
-        # Filter out the page marker line itself
-        lines = [l for l in lines if not re.match(r"^---\s*\[(?:Page|Slide|Chapter)\s+\d+\]\s*---", l, re.IGNORECASE)]
+        # Filter out boundary marker lines (Page, Slide, Chapter, Sheet, etc.)
+        lines = [l for l in lines if not re.match(r"^---\s*\[(?:Page|Slide|Chapter|Sheet)\s+\d+\]\s*---", l, re.IGNORECASE)]
 
         if not lines:
             return f"Page {page_num}" if page_num else "Section"
 
-        # 1. Look for explicit problem statement, challenge, question, task, or markdown title pattern
-        prob_pattern = re.compile(
-            r"^(?:Problem\s+(?:Statement\s+)?(?:\d+|[A-Z]+)|Problem[:\- ]|Question\s+\d+|Challenge\s+\d+|Task\s+\d+|Exercise\s+\d+|Topic\s+\d+|Section\s+\d+|#+)\s*[:\- ]*\s*(.*)$",
+        # 1. Structural headings & labeled document sections:
+        # e.g., Markdown (# Title), Numbered outlines (1. Overview, 1.0 Architecture, 2.1 Architecture),
+        # or standard document section keywords (Section, Chapter, Article, Clause, Overview, etc.)
+        structural_pattern = re.compile(
+            r"^(?:"
+            r"#{1,6}\s*(.+)"
+            r"|(?:\d+(?:\.\d+)*|[A-Z](?:\.\d+)*)[\.\)\:\-]?\s+([A-Z].*)"
+            r"|(?:Section|Chapter|Article|Item|Part|Clause|Exhibit|Appendix|Module|Unit|Problem|Question|Task|Challenge|Exercise|Scenario|Topic|Case|Finding|Requirement|Policy|Overview|Abstract|Methodology|Conclusion|Results|Discussion|Introduction|Background|Objective|Goal|Deliverable|Milestone|Standard|Rule|Definition)\s*(?:Statement\s*)?(?:[A-Z]|\d+)?\s*[:\- ]*\s*(.*)"
+            r")$",
             re.IGNORECASE
         )
         for line in lines[:5]:
-            m = prob_pattern.match(line)
+            m = structural_pattern.match(line)
             if m:
                 title_part = line.lstrip("#").strip()
                 if len(title_part) > 100:
                     title_part = title_part[:97] + "..."
                 return title_part
 
-        # 2. Look at first non-empty line if concise (<= 90 chars) and not a sentence fragment
-        first = lines[0].lstrip("#").strip()
-        if len(first) <= 90 and not first.endswith((".", ";", ":")):
-            return first
+        # 2. Standalone typographic heading lines:
+        # Short (<= 85 chars), not a sentence fragment (no ending '.', ';', ':')
+        for line in lines[:2]:
+            clean_line = line.lstrip("#").strip()
+            if 3 <= len(clean_line) <= 85 and not clean_line.endswith((".", ";", ":", ",")):
+                return clean_line
 
         return f"Page {page_num}" if page_num else "Main Content"
 
@@ -225,11 +234,11 @@ class HierarchicalSemanticChunker:
         Returns list of (parent_text, section_header, page_num) tuples.
         Priority:
           1. Page / Slide / Chapter markers (PDF, DOCX, PPTX pages)
-          2. Structural headings (Markdown '#', Problem Statement headers)
+          2. Structural headings (Markdown '#', numbered outlines, labeled document sections)
           3. Paragraph grouping fallback
         """
         # 1. Check for explicit Page markers
-        page_re = re.compile(r"^---\s*\[(?:Page|Slide|Chapter)\s+(\d+)\]\s*---", re.MULTILINE | re.IGNORECASE)
+        page_re = re.compile(r"^---\s*\[(?:Page|Slide|Chapter|Sheet)\s+(\d+)\]\s*---", re.MULTILINE | re.IGNORECASE)
         page_matches = list(page_re.finditer(text))
 
         if len(page_matches) >= 1:
@@ -247,9 +256,13 @@ class HierarchicalSemanticChunker:
                     sections.extend(sub_groups)
             return sections
 
-        # 2. Check for structural headings or problem statement patterns
+        # 2. Check for structural headings or labeled sections
         heading_re = re.compile(
-            r"^(?:#{1,6}\s+(.+)|(?:Problem\s+(?:Statement\s+)?(?:\d+|[A-Z]+)|Question\s+\d+|Challenge\s+\d+|Task\s+\d+|Exercise\s+\d+|Topic\s+\d+|Section\s+\d+)\s*[:\- ]*\s*(.+))$",
+            r"^(?:"
+            r"#{1,6}\s+.+"
+            r"|(?:\d+(?:\.\d+)*|[A-Z](?:\.\d+)*)[\.\)\:\-]?\s+[A-Z].+"
+            r"|(?:Section|Chapter|Article|Item|Part|Clause|Exhibit|Appendix|Module|Unit|Problem|Question|Task|Challenge|Exercise|Scenario|Topic|Case|Finding|Requirement|Policy|Overview|Abstract|Methodology|Conclusion|Results|Discussion|Introduction|Background|Objective|Goal|Deliverable|Milestone|Standard|Rule|Definition)\s*(?:Statement\s*)?(?:[A-Z]|\d+)?\s*[:\- ].+"
+            r")$",
             re.MULTILINE | re.IGNORECASE
         )
         heading_matches = list(heading_re.finditer(text))
@@ -262,7 +275,7 @@ class HierarchicalSemanticChunker:
                 if len(header) > 90:
                     header = header[:87] + "..."
                 section_text = text[match.start(): positions[i + 1]].strip()
-                page_m = re.search(r"---\s*\[Page\s+(\d+)\]\s*---", section_text)
+                page_m = re.search(r"---\s*\[(?:Page|Slide|Chapter|Sheet)\s+(\d+)\]\s*---", section_text)
                 p_num = int(page_m.group(1)) if page_m else None
                 if self._token_count(section_text) > int(self.parent_chunk_size * 1.5):
                     sub = self._group_paragraphs(section_text, header, default_page=p_num)

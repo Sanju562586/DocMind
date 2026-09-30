@@ -296,22 +296,38 @@ class HybridRetriever:
     @staticmethod
     def is_global_or_aggregation_query(query: str) -> bool:
         """
-        Detect queries asking for comprehensive summaries, full enumeration, or broad listing.
-        Examples: 'list all the problem statements', 'what are all the problem statements',
-        'list all problem statements', 'summarize everything', 'outline all sections', 'table of contents'.
+        Detect whether a query is asking for comprehensive recall across the entire document
+        (e.g., listing/enumerating all items of any category, whole-document summary, full outline, table of contents).
+        Domain-agnostic across research papers, contracts, technical specifications, reports, presentations, etc.
         """
         import re
         q = query.lower().strip()
         patterns = [
-            r"\b(list\s+all|show\s+all|give\s+me\s+all|tell\s+me\s+all|outline\s+all|extract\s+all|find\s+all|enumerate\s+all|get\s+all)\b",
-            r"\b(what\s+are\s+all|which\s+are\s+all|are\s+all\s+the|name\s+all)\b",
-            r"\ball\s+(the\s+)?(problem\s*statements?|problems?|questions?|topics?|sections?|challenges?|items?|requirements?|features?|pages?|titles?)\b",
-            r"\b(every|each)\s+(problem\s*statement|problem|question|topic|section|challenge|page|item)\b",
-            r"\b(complete|entire|whole|full)\s+(list|overview|summary|document|text|breakdown|catalog)\b",
-            r"\b(table\s+of\s+contents|table\s+of\s+content|index\s+of\s+topics|all\s+titles)\b",
-            r"\b(summarize\s+all|summarize\s+each|summarize\s+every|overview\s+of\s+all|brief\s+all)\b",
-            r"\b(how\s+many\s+total|total\s+number\s+of|count\s+of)\b",
+            # 1. Broad listing, extraction, or enumeration commands:
+            # "list all ...", "show all ...", "give me all ...", "outline all ...", "extract all ...",
+            # "enumerate all ...", "find all ...", "get all ...", "name all ...", "collect all ..."
+            r"\b(list|show|give|tell|outline|extract|find|enumerate|collect|get|name|detail|identify)\s+(me\s+)?(all|every|each|the\s+entire|the\s+whole)\b",
+
+            # 2. "What are all / which are all / what is every / name every":
+            r"\b(what|which)\s+are\s+(all\s+(the\s+)?|every\s+|each\s+)\b",
+            r"\b(what|which)\s+is\s+(every|each)\b",
+
+            # 3. Explicit numeric enumeration requests: "all 16 ...", "all 10 ...", "all 5 ..."
             r"\ball\s+\d+\b",
+
+            # 4. Universal plural nouns preceded by "all (the)":
+            r"\ball\s+(the\s+)?(\d+\s+)?([a-z0-9_\-]+\s+){0,2}(items|points|topics|sections|pages|parts|clauses|articles|chapters|questions|problems|challenges|tasks|findings|requirements|recommendations|features|risks|issues|objectives|goals|milestones|steps|definitions|terms|examples|rules|criteria|statements|titles|headers|headings|modules|units|elements|components|categories|specifications|conclusions)\b",
+
+            # 5. "Every / each" single item:
+            r"\b(every|each)\s+([a-z0-9_\-]+\s+)?(item|point|topic|section|page|part|clause|article|chapter|question|problem|challenge|task|finding|requirement|recommendation|feature|risk|issue|objective|goal|milestone|step|definition|term|example|rule|criterion|statement|title|header|heading|module|unit|element|component|specification|conclusion)\b",
+
+            # 6. Whole-document overview, synthesis, or complete breakdown:
+            r"\b(complete|entire|whole|full)\s+(list|overview|summary|document|text|breakdown|catalog|audit|review|analysis|outline|index)\b",
+            r"\b(table\s+of\s+contents|table\s+of\s+content|index\s+of|document\s+structure|document\s+outline|all\s+titles)\b",
+            r"\b(summarize\s+(the\s+)?(entire|whole|all|complete|document|everything)|overview\s+of\s+(the\s+)?(entire|whole|all|document))\b",
+
+            # 7. Counting & quantitative aggregation:
+            r"\b(how\s+many\s+total|total\s+number\s+of|count\s+of|how\s+many\s+[a-z]+(\s+in\s+the\s+document)?)\b",
         ]
         return any(re.search(pat, q) for pat in patterns)
 
@@ -463,11 +479,15 @@ class HybridRetriever:
         unique_parents = {c.parent_id for c in chunks}
         unique_parent_count = len(unique_parents)
 
-        if is_global:
-            # For comprehensive/aggregation queries (e.g. "list all problem statements"),
-            # expand top_k to encompass all unique sections/pages (up to 35 sections)
-            if top_k is None or top_k < unique_parent_count:
-                top_k = min(unique_parent_count, 35) if unique_parent_count > 0 else (top_k or self.top_k)
+        if unique_parent_count <= 12 and unique_parent_count > 0:
+            # For compact documents (<= 12 sections / pages, ~4,000 tokens),
+            # provide 100% of the document context for perfect recall on any query
+            top_k = unique_parent_count
+            candidates_k = max(candidates_k or self.candidates_k, n)
+        elif is_global:
+            # For comprehensive aggregation/listing/overview queries across larger documents,
+            # adaptively scale retrieval up to 40 unique parent sections (~14,000 tokens)
+            top_k = min(unique_parent_count, 40) if unique_parent_count > 0 else (top_k or self.top_k)
             candidates_k = max(candidates_k or self.candidates_k, min(n, 120))
         else:
             top_k = top_k or self.top_k
@@ -526,9 +546,9 @@ class HybridRetriever:
                 "metadata": chunk.metadata,
             })
 
-        # For global / aggregation queries with small to medium document size (<= 35 parents),
+        # For global / aggregation queries OR compact documents (<= 12 parents),
         # guarantee 100% parent coverage if any parents were not captured in top candidates
-        if is_global and len(results) < min(unique_parent_count, top_k):
+        if (is_global or unique_parent_count <= 12) and len(results) < min(unique_parent_count, top_k):
             for c in chunks:
                 if len(results) >= top_k:
                     break

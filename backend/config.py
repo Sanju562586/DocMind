@@ -117,6 +117,7 @@ class Settings(BaseSettings):
     enable_neural_models: bool = True
     retrieval_candidates: int = 60    # candidates fed to cross-encoder
     retrieval_top_k: int = 10         # default results returned for standard queries
+    retrieval_global_max_k: int = 40  # maximum parent sections retrieved for global enumeration/summary queries
 
     # In-memory LRU cache max for session indexes
     max_cached_sessions: int = 30
