@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 from collections import Counter
 
+# pyrefly: ignore [missing-import]
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -31,7 +32,6 @@ logger = logging.getLogger(__name__)
 # Graceful import of SentenceTransformer
 _HAVE_SENTENCE_TRANSFORMERS = False
 try:
-    from sentence_transformers import SentenceTransformer
     _HAVE_SENTENCE_TRANSFORMERS = True
 except ImportError:
     logger.warning("sentence-transformers not installed. Using fast subword TF-IDF vectorizer fallback for chunking.")
@@ -136,13 +136,14 @@ class HierarchicalSemanticChunker:
         all_chunks: List[Chunk] = []
         global_chunk_idx = 0
 
-        for parent_idx, (parent_text, section_header) in enumerate(parent_sections):
+        for parent_idx, (parent_text, section_header, page_num) in enumerate(parent_sections):
             parent_id = str(uuid.uuid4())
             child_texts = self._semantic_split(parent_text)
 
-            # Extract page number marker if present in parent section
-            page_match = re.search(r"---\s*\[Page\s+(\d+)\]\s*---", parent_text)
-            page_num = int(page_match.group(1)) if page_match else None
+            # Fallback page extraction if not detected in section tuple
+            if page_num is None:
+                page_match = re.search(r"---\s*\[Page\s+(\d+)\]\s*---", parent_text)
+                page_num = int(page_match.group(1)) if page_match else None
 
             for child_text in child_texts:
                 if not child_text.strip():
@@ -150,7 +151,7 @@ class HierarchicalSemanticChunker:
 
                 chunk_id = str(uuid.uuid4())
                 contextual_text = self._build_contextual_text(
-                    child_text, section_header, doc_metadata
+                    child_text, section_header, doc_metadata, page_num=page_num
                 )
 
                 chunk = Chunk(
@@ -187,34 +188,100 @@ class HierarchicalSemanticChunker:
     # Step 1: Structural Parent Split
     # ──────────────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _detect_section_header(page_text: str, page_num: Optional[int] = None) -> str:
+        """
+        Intelligently extract the title or problem statement header from page/section text.
+        """
+        lines = [line.strip() for line in page_text.splitlines() if line.strip()]
+        # Filter out the page marker line itself
+        lines = [l for l in lines if not re.match(r"^---\s*\[(?:Page|Slide|Chapter)\s+\d+\]\s*---", l, re.IGNORECASE)]
+
+        if not lines:
+            return f"Page {page_num}" if page_num else "Section"
+
+        # 1. Look for explicit problem statement, challenge, question, task, or markdown title pattern
+        prob_pattern = re.compile(
+            r"^(?:Problem\s+(?:Statement\s+)?(?:\d+|[A-Z]+)|Problem[:\- ]|Question\s+\d+|Challenge\s+\d+|Task\s+\d+|Exercise\s+\d+|Topic\s+\d+|Section\s+\d+|#+)\s*[:\- ]*\s*(.*)$",
+            re.IGNORECASE
+        )
+        for line in lines[:5]:
+            m = prob_pattern.match(line)
+            if m:
+                title_part = line.lstrip("#").strip()
+                if len(title_part) > 100:
+                    title_part = title_part[:97] + "..."
+                return title_part
+
+        # 2. Look at first non-empty line if concise (<= 90 chars) and not a sentence fragment
+        first = lines[0].lstrip("#").strip()
+        if len(first) <= 90 and not first.endswith((".", ";", ":")):
+            return first
+
+        return f"Page {page_num}" if page_num else "Main Content"
+
     def _split_into_parents(self, text: str) -> List[tuple]:
         """
-        Returns list of (parent_text, section_header) tuples.
-        Prefers heading-based splitting; falls back to paragraph grouping.
+        Returns list of (parent_text, section_header, page_num) tuples.
+        Priority:
+          1. Page / Slide / Chapter markers (PDF, DOCX, PPTX pages)
+          2. Structural headings (Markdown '#', Problem Statement headers)
+          3. Paragraph grouping fallback
         """
-        heading_re = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
+        # 1. Check for explicit Page markers
+        page_re = re.compile(r"^---\s*\[(?:Page|Slide|Chapter)\s+(\d+)\]\s*---", re.MULTILINE | re.IGNORECASE)
+        page_matches = list(page_re.finditer(text))
+
+        if len(page_matches) >= 1:
+            sections = []
+            positions = [m.start() for m in page_matches] + [len(text)]
+            for i, m in enumerate(page_matches):
+                p_num = int(m.group(1))
+                page_text = text[m.start(): positions[i + 1]].strip()
+                sec_header = self._detect_section_header(page_text, p_num)
+                # If page is moderately sized (<= ~768 tokens), keep it as a unified parent chunk
+                if self._token_count(page_text) <= int(self.parent_chunk_size * 1.5):
+                    sections.append((page_text, sec_header, p_num))
+                else:
+                    sub_groups = self._group_paragraphs(page_text, sec_header, default_page=p_num)
+                    sections.extend(sub_groups)
+            return sections
+
+        # 2. Check for structural headings or problem statement patterns
+        heading_re = re.compile(
+            r"^(?:#{1,6}\s+(.+)|(?:Problem\s+(?:Statement\s+)?(?:\d+|[A-Z]+)|Question\s+\d+|Challenge\s+\d+|Task\s+\d+|Exercise\s+\d+|Topic\s+\d+|Section\s+\d+)\s*[:\- ]*\s*(.+))$",
+            re.MULTILINE | re.IGNORECASE
+        )
         heading_matches = list(heading_re.finditer(text))
 
         if len(heading_matches) >= 2:
             sections = []
             positions = [m.start() for m in heading_matches] + [len(text)]
             for i, match in enumerate(heading_matches):
-                header = match.group(2).strip()
+                header = match.group(0).lstrip("#").strip()
+                if len(header) > 90:
+                    header = header[:87] + "..."
                 section_text = text[match.start(): positions[i + 1]].strip()
-                if self._token_count(section_text) > self.parent_chunk_size * 2:
-                    sub = self._group_paragraphs(section_text, header)
+                page_m = re.search(r"---\s*\[Page\s+(\d+)\]\s*---", section_text)
+                p_num = int(page_m.group(1)) if page_m else None
+                if self._token_count(section_text) > int(self.parent_chunk_size * 1.5):
+                    sub = self._group_paragraphs(section_text, header, default_page=p_num)
                     sections.extend(sub)
                 else:
-                    sections.append((section_text, header))
+                    sections.append((section_text, header, p_num))
             return sections
 
-        return self._group_paragraphs(text, header="Main Content")
+        # 3. Fallback to paragraph grouping
+        return self._group_paragraphs(text, header="Main Content", default_page=None)
 
-    def _group_paragraphs(self, text: str, header: str) -> List[tuple]:
+    def _group_paragraphs(
+        self, text: str, header: str, default_page: Optional[int] = None
+    ) -> List[tuple]:
         paragraphs = re.split(r"\n{2,}", text)
         groups: List[tuple] = []
         current_paras: List[str] = []
         current_tokens = 0
+        part_idx = 1
 
         for para in paragraphs:
             para = para.strip()
@@ -222,7 +289,12 @@ class HierarchicalSemanticChunker:
                 continue
             pt = self._token_count(para)
             if current_tokens + pt > self.parent_chunk_size and current_paras:
-                groups.append(("\n\n".join(current_paras), header))
+                group_text = "\n\n".join(current_paras)
+                p_match = re.search(r"---\s*\[Page\s+(\d+)\]\s*---", group_text)
+                p_num = int(p_match.group(1)) if p_match else default_page
+                sub_header = f"{header} (Part {part_idx})" if part_idx > 1 else header
+                groups.append((group_text, sub_header, p_num))
+                part_idx += 1
                 current_paras = [para]
                 current_tokens = pt
             else:
@@ -230,9 +302,13 @@ class HierarchicalSemanticChunker:
                 current_tokens += pt
 
         if current_paras:
-            groups.append(("\n\n".join(current_paras), header))
+            group_text = "\n\n".join(current_paras)
+            p_match = re.search(r"---\s*\[Page\s+(\d+)\]\s*---", group_text)
+            p_num = int(p_match.group(1)) if p_match else default_page
+            sub_header = f"{header} (Part {part_idx})" if part_idx > 1 else header
+            groups.append((group_text, sub_header, p_num))
 
-        return groups if groups else [(text, header)]
+        return groups if groups else [(text, header, default_page)]
 
     # ──────────────────────────────────────────────────────────────────────
     # Step 2: Semantic Child Split
@@ -243,6 +319,10 @@ class HierarchicalSemanticChunker:
         Split parent text into semantically cohesive child chunks by detecting
         topic boundaries via cosine distance between adjacent sentence embeddings.
         """
+        # If parent text is already compact (<= 1.5x child chunk size), keep it unified
+        if self._token_count(text) <= int(self.child_chunk_size * 1.5):
+            return [text.strip()]
+
         sentences = self._split_sentences(text)
 
         if len(sentences) <= 3:
@@ -277,11 +357,12 @@ class HierarchicalSemanticChunker:
     # ──────────────────────────────────────────────────────────────────────
 
     def _build_contextual_text(
-        self, child_text: str, section_header: str, doc_metadata: Dict
+        self, child_text: str, section_header: str, doc_metadata: Dict, page_num: Optional[int] = None
     ) -> str:
         doc_title = doc_metadata.get("title") or doc_metadata.get("source") or "Document"
+        page_str = f" [Page: {page_num}]" if page_num is not None else ""
         context = (
-            f"[Document: {doc_title}] "
+            f"[Document: {doc_title}]{page_str} "
             f"[Section: {section_header}] "
             f"{child_text}"
         )

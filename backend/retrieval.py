@@ -23,8 +23,13 @@ import numpy as np
 
 from chunker import Chunk, FastSubwordVectorizer
 
+import re
 from collections import Counter, OrderedDict
 import json
+
+def _tokenize_text(text: str) -> List[str]:
+    """Tokenize text into alphanumeric words, stripping punctuation for robust BM25 matching."""
+    return re.findall(r"\b[a-zA-Z0-9_\-]+\b", text.lower())
 
 logger = logging.getLogger(__name__)
 
@@ -219,7 +224,7 @@ class HybridRetriever:
             return
 
         # BM25 indexing
-        tokenized = [c.contextual_text.lower().split() for c in combined_chunks]
+        tokenized = [_tokenize_text(c.contextual_text) for c in combined_chunks]
         if _HAVE_BM25:
             bm25 = BM25Okapi(tokenized)
         else:
@@ -287,6 +292,28 @@ class HybridRetriever:
     # ──────────────────────────────────────────────────────────────────────
     # Session Document Retrieval
     # ──────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def is_global_or_aggregation_query(query: str) -> bool:
+        """
+        Detect queries asking for comprehensive summaries, full enumeration, or broad listing.
+        Examples: 'list all the problem statements', 'what are all the problem statements',
+        'list all problem statements', 'summarize everything', 'outline all sections', 'table of contents'.
+        """
+        import re
+        q = query.lower().strip()
+        patterns = [
+            r"\b(list\s+all|show\s+all|give\s+me\s+all|tell\s+me\s+all|outline\s+all|extract\s+all|find\s+all|enumerate\s+all|get\s+all)\b",
+            r"\b(what\s+are\s+all|which\s+are\s+all|are\s+all\s+the|name\s+all)\b",
+            r"\ball\s+(the\s+)?(problem\s*statements?|problems?|questions?|topics?|sections?|challenges?|items?|requirements?|features?|pages?|titles?)\b",
+            r"\b(every|each)\s+(problem\s*statement|problem|question|topic|section|challenge|page|item)\b",
+            r"\b(complete|entire|whole|full)\s+(list|overview|summary|document|text|breakdown|catalog)\b",
+            r"\b(table\s+of\s+contents|table\s+of\s+content|index\s+of\s+topics|all\s+titles)\b",
+            r"\b(summarize\s+all|summarize\s+each|summarize\s+every|overview\s+of\s+all|brief\s+all)\b",
+            r"\b(how\s+many\s+total|total\s+number\s+of|count\s+of)\b",
+            r"\ball\s+\d+\b",
+        ]
+        return any(re.search(pat, q) for pat in patterns)
 
     def retrieve(
         self,
@@ -365,7 +392,7 @@ class HybridRetriever:
 
             chunks = all_chunks
             n = len(chunks)
-            tokenized_all = [c.contextual_text.lower().split() for c in chunks]
+            tokenized_all = [_tokenize_text(c.contextual_text) for c in chunks]
             if _HAVE_BM25:
                 bm25_model = BM25Okapi(tokenized_all)
             else:
@@ -377,7 +404,7 @@ class HybridRetriever:
                 doc_embs = np.zeros((n, 384), dtype=np.float32)
 
             t0 = time.perf_counter()
-            tokenized_query = query.lower().split()
+            tokenized_query = _tokenize_text(query)
             bm25_scores = bm25_model.get_scores(tokenized_query)
             bm25_ranks = np.argsort(bm25_scores)[::-1]
             bm25_latency = (time.perf_counter() - t0) * 1000.0
@@ -410,7 +437,7 @@ class HybridRetriever:
 
             # ── Stage 1a: BM25 (Keyword) ──
             t0 = time.perf_counter()
-            tokenized_query = query.lower().split()
+            tokenized_query = _tokenize_text(query)
             bm25_model = self._session_bm25[session_id]
             bm25_scores = bm25_model.get_scores(tokenized_query)
             bm25_ranks = np.argsort(bm25_scores)[::-1]
@@ -431,7 +458,21 @@ class HybridRetriever:
             dense_ranks = np.argsort(dense_scores)[::-1]
             dense_latency = (time.perf_counter() - t1) * 1000.0
 
-        # ── Stage 2: Reciprocal Rank Fusion (RRF) ──
+        # ── Stage 2: Reciprocal Rank Fusion (RRF) & Adaptive Top-K ──
+        is_global = self.is_global_or_aggregation_query(query)
+        unique_parents = {c.parent_id for c in chunks}
+        unique_parent_count = len(unique_parents)
+
+        if is_global:
+            # For comprehensive/aggregation queries (e.g. "list all problem statements"),
+            # expand top_k to encompass all unique sections/pages (up to 35 sections)
+            if top_k is None or top_k < unique_parent_count:
+                top_k = min(unique_parent_count, 35) if unique_parent_count > 0 else (top_k or self.top_k)
+            candidates_k = max(candidates_k or self.candidates_k, min(n, 120))
+        else:
+            top_k = top_k or self.top_k
+            candidates_k = candidates_k or self.candidates_k
+
         RRF_K = 60
         rrf_scores = np.zeros(n, dtype=np.float64)
         for rank, idx in enumerate(bm25_ranks):
@@ -485,6 +526,42 @@ class HybridRetriever:
                 "metadata": chunk.metadata,
             })
 
+        # For global / aggregation queries with small to medium document size (<= 35 parents),
+        # guarantee 100% parent coverage if any parents were not captured in top candidates
+        if is_global and len(results) < min(unique_parent_count, top_k):
+            for c in chunks:
+                if len(results) >= top_k:
+                    break
+                if c.parent_id not in seen_parent_ids:
+                    seen_parent_ids.add(c.parent_id)
+                    results.append({
+                        "chunk_id": c.id,
+                        "doc_id": c.doc_id,
+                        "child_text": c.text,
+                        "parent_text": c.parent_text,
+                        "rerank_score": 0.0,
+                        "bm25_score": 0.0,
+                        "dense_score": 0.0,
+                        "rrf_score": 0.0,
+                        "metadata": c.metadata,
+                    })
+
+        # Sort results in natural document order (page number, then parent index, then chunk index)
+        # so the LLM reads the document sequentially from beginning to end
+        def _doc_sort_key(item: Dict[str, Any]):
+            meta = item.get("metadata", {})
+            p_num = meta.get("page_number")
+            p_idx = meta.get("parent_index", 0)
+            c_idx = meta.get("chunk_index", 0)
+            return (
+                str(item.get("doc_id", "")),
+                p_num if p_num is not None else 9999,
+                p_idx if p_idx is not None else 0,
+                c_idx if c_idx is not None else 0,
+            )
+
+        results.sort(key=_doc_sort_key)
+
         total_latency = (time.perf_counter() - t_start) * 1000.0
         self.last_latency_metrics = {
             "bm25_ms": round(bm25_latency, 2),
@@ -517,13 +594,13 @@ class HybridRetriever:
             return []
 
         # Tokenized BM25 over memories
-        corpus = [m["content"].lower().split() for m in memories]
+        corpus = [_tokenize_text(m["content"]) for m in memories]
         if _HAVE_BM25:
             bm25 = BM25Okapi(corpus)
         else:
             bm25 = SimpleBM25(corpus)
 
-        tokenized_q = query.lower().split()
+        tokenized_q = _tokenize_text(query)
         bm25_scores = bm25.get_scores(tokenized_q)
 
         # Semantic embeddings over memories
@@ -588,7 +665,7 @@ class HybridRetriever:
                 chunks = [_dict_to_chunk(d) for d in chunks_data]
 
                 # Reconstruct BM25 model
-                tokenized = [c.contextual_text.lower().split() for c in chunks]
+                tokenized = [_tokenize_text(c.contextual_text) for c in chunks]
                 bm25 = BM25Okapi(tokenized) if _HAVE_BM25 else SimpleBM25(tokenized)
 
                 self._session_bm25[session_id] = bm25

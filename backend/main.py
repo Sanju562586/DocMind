@@ -29,7 +29,8 @@ except Exception:
 
 import time
 import aiofiles
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile, Query, BackgroundTasks, status
+
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, BackgroundTasks, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, Response
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -946,6 +947,13 @@ Your top priority is to communicate in a **standard, formal, and professional ma
    - For key definitions, always format cleanly as `- **Term Name:** Clear explanation.` on a single line.
    - Format document citations cleanly as `[Document.docx]` directly attached to sentences without trailing spaces before punctuation.
 
+## EXHAUSTIVE ENUMERATION & COMPLETE LISTING PROTOCOL
+- When the user asks to list, enumerate, extract, or identify items from the document (such as "list all problem statements", "what are all the problem statements", "list all questions", "summarize every page", "outline all requirements"):
+  1. **Complete & Uncompromised Recall**: You MUST list EVERY SINGLE item that exists across the received document context and pages. Never stop early, never sample a subset, and NEVER truncate with "etc." or "...". If there are 16 problem statements in the context, your list MUST contain all 16 items.
+  2. **Sequential Numbering**: Number each item clearly and in exact document order (e.g., `1. **Problem Statement 1: Title**`, `2. **Problem Statement 2: Title**`, etc.).
+  3. **Direct Title & Concise Description**: For each item, state its exact title/heading from the source and provide a clear, concise summary of its description as stated in the document.
+  4. **Page Citations**: Accompany each item with its page number or source tag (e.g. `[Page 1]`, `[Page 2]`) whenever available.
+
 ## DOCUMENT-GROUNDING PROTOCOL
 Follow this decision flow for every user query:
 
@@ -1032,7 +1040,9 @@ async def chat(request: Request, body: ChatRequest):
         for i, r in enumerate(retrieved_chunks, 1):
             doc_name = r["metadata"].get("title") or r["metadata"].get("source") or "Document"
             section = r["metadata"].get("section", "Section")
-            doc_parts.append(f"[Source {i} | Doc: {doc_name} | {section}]\n{r['parent_text']}")
+            page_num = r["metadata"].get("page_number")
+            page_info = f" | Page {page_num}" if page_num is not None else ""
+            doc_parts.append(f"[Source {i} | Doc: {doc_name}{page_info} | {section}]\n{r['parent_text']}")
         doc_context = "\n\n".join(doc_parts)
     else:
         if use_global:

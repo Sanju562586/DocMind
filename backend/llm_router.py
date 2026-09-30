@@ -27,6 +27,7 @@ try:
 except Exception:
     pass
 
+# pyrefly: ignore [missing-import]
 import httpx
 
 logger = logging.getLogger(__name__)
@@ -113,7 +114,7 @@ class GeminiProvider(LLMProvider):
             "contents": contents,
             "generationConfig": {
                 "temperature": 0.7,
-                "maxOutputTokens": 3072,
+                "maxOutputTokens": 4096,
             },
         }
         if system_msg:
@@ -212,7 +213,7 @@ class GroqProvider(LLMProvider):
                     "model": m_name,
                     "messages": messages,
                     "stream": True,
-                    "max_tokens": 3072,
+                    "max_tokens": 4096,
                     "temperature": 0.7,
                 }
 
@@ -302,7 +303,7 @@ class OpenRouterProvider(LLMProvider):
                     "model": m_name,
                     "messages": messages,
                     "stream": True,
-                    "max_tokens": 3072,
+                    "max_tokens": 4096,
                     "temperature": 0.7,
                 }
 

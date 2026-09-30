@@ -115,8 +115,8 @@ class Settings(BaseSettings):
 
     # Retrieval config
     enable_neural_models: bool = True
-    retrieval_candidates: int = 50    # candidates fed to cross-encoder
-    retrieval_top_k: int = 5          # final results returned
+    retrieval_candidates: int = 60    # candidates fed to cross-encoder
+    retrieval_top_k: int = 10         # default results returned for standard queries
 
     # In-memory LRU cache max for session indexes
     max_cached_sessions: int = 30

@@ -338,6 +338,7 @@ export function MessageBubble({ message, isLatest, onOpenCitation, onSelectFollo
     return `~${mins} min read`;
   }, [wordCount]);
 
+  const [showAllSources, setShowAllSources] = useState(false);
   const hasSources = !isUser && message.sources && message.sources.length > 0;
 
   return (
@@ -402,9 +403,9 @@ export function MessageBubble({ message, isLatest, onOpenCitation, onSelectFollo
         {hasSources && (
           <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginTop: 8, padding: "0 2px" }}>
             <span style={{ fontSize: 10, color: "rgba(255, 255, 255, 0.4)", display: "flex", alignItems: "center", gap: 3 }}>
-              <BookOpen size={10} /> Sources:
+              <BookOpen size={10} /> Sources ({message.sources!.length}):
             </span>
-            {message.sources!.slice(0, 4).map((src, i) => (
+            {(showAllSources ? message.sources! : message.sources!.slice(0, 4)).map((src, i) => (
               <InlineCitationChip
                 key={i}
                 source={src}
@@ -412,6 +413,25 @@ export function MessageBubble({ message, isLatest, onOpenCitation, onSelectFollo
                 onOpenCitation={onOpenCitation}
               />
             ))}
+            {message.sources!.length > 4 && (
+              <button
+                type="button"
+                onClick={() => setShowAllSources(!showAllSources)}
+                style={{
+                  background: "rgba(255, 255, 255, 0.06)",
+                  border: "1px solid rgba(255, 255, 255, 0.12)",
+                  borderRadius: 12,
+                  padding: "2px 8px",
+                  fontSize: 10,
+                  color: "var(--accent, #6366F1)",
+                  cursor: "pointer",
+                  fontWeight: 500,
+                  transition: "all 0.15s ease",
+                }}
+              >
+                {showAllSources ? "Show fewer" : `+${message.sources!.length - 4} more`}
+              </button>
+            )}
           </div>
         )}
 
