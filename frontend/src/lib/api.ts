@@ -6,6 +6,25 @@ const API_BASE = process.env.NEXT_PUBLIC_DIRECT_API === "true" && process.env.NE
   ? `${process.env.NEXT_PUBLIC_BACKEND_URL.replace(/\/+$/, "").replace(/\/api$/, "")}/api`
   : "/api/backend";
 
+function parseUserJson(val: string | null): any {
+  if (!val) return null;
+  let cur = val.trim();
+  for (let i = 0; i < 3; i++) {
+    try {
+      const parsed = JSON.parse(cur);
+      if (parsed && typeof parsed === "object") return parsed;
+    } catch {}
+    try {
+      const decoded = decodeURIComponent(cur);
+      if (decoded === cur) break;
+      cur = decoded;
+    } catch {
+      break;
+    }
+  }
+  return null;
+}
+
 function getUserHeaders(): Record<string, string> {
   if (typeof window === "undefined") return {};
   try {
@@ -16,15 +35,7 @@ function getUserHeaders(): Record<string, string> {
         c = c.trim();
         if (c.startsWith("docmind_user=")) {
           const val = c.substring("docmind_user=".length);
-          try {
-            const raw = val.trim();
-            const clean = raw.startsWith("{") ? raw : decodeURIComponent(raw);
-            cookieUser = JSON.parse(clean);
-          } catch {
-            try {
-              cookieUser = JSON.parse(val);
-            } catch {}
-          }
+          cookieUser = parseUserJson(val);
           break;
         }
       }
@@ -32,18 +43,7 @@ function getUserHeaders(): Record<string, string> {
 
     let lsUser: any = null;
     if (typeof localStorage !== "undefined") {
-      const ls = localStorage.getItem("docmind_user");
-      if (ls) {
-        try {
-          const raw = ls.trim();
-          const clean = raw.startsWith("{") ? raw : decodeURIComponent(raw);
-          lsUser = JSON.parse(clean);
-        } catch {
-          try {
-            lsUser = JSON.parse(ls);
-          } catch {}
-        }
-      }
+      lsUser = parseUserJson(localStorage.getItem("docmind_user"));
     }
 
     const effectiveUser = (cookieUser && (!cookieUser.isDemo || !lsUser)) ? cookieUser : (lsUser || cookieUser);

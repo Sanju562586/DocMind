@@ -91,6 +91,9 @@ export function AuthModal() {
     clearAuthErrorDetails,
     googleClientId,
     googleConfigured,
+    githubConfigured,
+    googleRedirectUri,
+    githubRedirectUri,
     closeAuthModal,
     loginDemo,
     loginWithCredentials,
@@ -105,14 +108,16 @@ export function AuthModal() {
   const [password, setPassword] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [copiedRedirectUri, setCopiedRedirectUri] = useState(false);
+  const [copiedGithubUri, setCopiedGithubUri] = useState(false);
   const [copiedOrigin, setCopiedOrigin] = useState(false);
   const [gisRendered, setGisRendered] = useState(false);
   const googleGisRef = React.useRef<HTMLDivElement>(null);
 
   const currentOrigin = typeof window !== "undefined" ? window.location.origin : "http://localhost:3000";
-  const authorizedRedirectUri = `${currentOrigin}/api/auth/callback/google`;
+  const authorizedGoogleRedirectUri = googleRedirectUri || `${currentOrigin}/api/auth/callback/google`;
+  const authorizedGithubRedirectUri = githubRedirectUri || `${currentOrigin}/api/auth/callback/github`;
 
-  // Auto-switch to OAuth tab if there is an OAuth error
+  // Auto-switch to OAuth tab if there is an OAuth error or if OAuth credentials are present
   React.useEffect(() => {
     if (authErrorDetails) {
       setTab("oauth");
@@ -181,12 +186,15 @@ export function AuthModal() {
     };
   }, [isAuthModalOpen, tab, googleClientId, loginWithGoogleCredential]);
 
-  const copyToClipboard = (text: string, type: "uri" | "origin") => {
+  const copyToClipboard = (text: string, type: "uri" | "github_uri" | "origin") => {
     if (typeof navigator !== "undefined" && navigator.clipboard) {
       navigator.clipboard.writeText(text);
       if (type === "uri") {
         setCopiedRedirectUri(true);
         setTimeout(() => setCopiedRedirectUri(false), 2000);
+      } else if (type === "github_uri") {
+        setCopiedGithubUri(true);
+        setTimeout(() => setCopiedGithubUri(false), 2000);
       } else {
         setCopiedOrigin(true);
         setTimeout(() => setCopiedOrigin(false), 2000);
@@ -531,7 +539,11 @@ export function AuthModal() {
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 6, color: "#fca5a5", fontWeight: 700, fontSize: 12 }}>
                       <AlertCircle size={15} />
-                      <span>Google Cloud Console Action Required</span>
+                      <span>
+                        {authErrorDetails.error.toLowerCase().includes("github")
+                          ? "GitHub OAuth Troubleshooting"
+                          : "OAuth Configuration Notice"}
+                      </span>
                     </div>
                     <button
                       onClick={clearAuthErrorDetails}
@@ -543,13 +555,21 @@ export function AuthModal() {
                   </div>
                   <p style={{ fontSize: 11, color: "rgba(255,255,255,0.85)", margin: "0 0 8px 0", lineHeight: 1.45 }}>
                     {authErrorDetails.error.includes("redirect_uri_mismatch")
-                      ? "Google rejected the redirect because this URL is not yet listed under 'Authorized redirect URIs' in your Google Cloud project credentials."
+                      ? "OAuth provider rejected the callback because the redirect URL is not listed under authorized redirect URIs in your developer console."
                       : authErrorDetails.description || authErrorDetails.error}
                   </p>
                   <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                     <button
                       type="button"
-                      onClick={() => copyToClipboard(authErrorDetails.redirectUri || authorizedRedirectUri, "uri")}
+                      onClick={() =>
+                        copyToClipboard(
+                          authErrorDetails.redirectUri ||
+                            (authErrorDetails.error.toLowerCase().includes("github")
+                              ? authorizedGithubRedirectUri
+                              : authorizedGoogleRedirectUri),
+                          authErrorDetails.error.toLowerCase().includes("github") ? "github_uri" : "uri"
+                        )
+                      }
                       style={{
                         display: "flex",
                         alignItems: "center",
@@ -564,29 +584,58 @@ export function AuthModal() {
                         cursor: "pointer",
                       }}
                     >
-                      {copiedRedirectUri ? <Check size={12} color="#86efac" /> : <Copy size={12} />}
-                      {copiedRedirectUri ? "Copied Redirect URI!" : "Copy Redirect URI"}
+                      {(authErrorDetails.error.toLowerCase().includes("github") ? copiedGithubUri : copiedRedirectUri) ? (
+                        <Check size={12} color="#86efac" />
+                      ) : (
+                        <Copy size={12} />
+                      )}
+                      {(authErrorDetails.error.toLowerCase().includes("github") ? copiedGithubUri : copiedRedirectUri)
+                        ? "Copied Redirect URI!"
+                        : "Copy Callback URI"}
                     </button>
-                    <a
-                      href="https://console.cloud.google.com/apis/credentials"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 5,
-                        padding: "5px 9px",
-                        borderRadius: 6,
-                        background: "rgba(255, 255, 255, 0.1)",
-                        border: "1px solid rgba(255, 255, 255, 0.2)",
-                        color: "#fff",
-                        fontSize: 11,
-                        fontWeight: 600,
-                        textDecoration: "none",
-                      }}
-                    >
-                      <ExternalLink size={12} /> Google Cloud Console
-                    </a>
+                    {authErrorDetails.error.toLowerCase().includes("github") ? (
+                      <a
+                        href="https://github.com/settings/developers"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 5,
+                          padding: "5px 9px",
+                          borderRadius: 6,
+                          background: "rgba(255, 255, 255, 0.1)",
+                          border: "1px solid rgba(255, 255, 255, 0.2)",
+                          color: "#fff",
+                          fontSize: 11,
+                          fontWeight: 600,
+                          textDecoration: "none",
+                        }}
+                      >
+                        <ExternalLink size={12} /> GitHub OAuth Apps Settings
+                      </a>
+                    ) : (
+                      <a
+                        href="https://console.cloud.google.com/apis/credentials"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 5,
+                          padding: "5px 9px",
+                          borderRadius: 6,
+                          background: "rgba(255, 255, 255, 0.1)",
+                          border: "1px solid rgba(255, 255, 255, 0.2)",
+                          color: "#fff",
+                          fontSize: 11,
+                          fontWeight: 600,
+                          textDecoration: "none",
+                        }}
+                      >
+                        <ExternalLink size={12} /> Google Cloud Console
+                      </a>
+                    )}
                   </div>
                 </div>
               )}
@@ -779,11 +828,11 @@ export function AuthModal() {
                             wordBreak: "break-all",
                           }}
                         >
-                          {authorizedRedirectUri}
+                          {authorizedGoogleRedirectUri}
                         </code>
                         <button
                           type="button"
-                          onClick={() => copyToClipboard(authorizedRedirectUri, "uri")}
+                          onClick={() => copyToClipboard(authorizedGoogleRedirectUri, "uri")}
                           style={{
                             display: "flex",
                             alignItems: "center",
@@ -860,6 +909,148 @@ export function AuthModal() {
                         }}
                       >
                         <ExternalLink size={10} /> Open Google Cloud Console APIs &amp; Services Credentials
+                      </a>
+                    </div>
+                  </div>
+                </div>
+
+                {/* GitHub Developer Applications Setup Guide Box */}
+                <div
+                  style={{
+                    marginTop: 4,
+                    padding: "10px 12px",
+                    borderRadius: 8,
+                    background: "rgba(255, 255, 255, 0.04)",
+                    border: "1px solid rgba(255, 255, 255, 0.12)",
+                    fontSize: 11,
+                    color: "rgba(255, 255, 255, 0.7)",
+                    lineHeight: 1.5,
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                    <div style={{ fontWeight: 600, color: "#cbd5e1", display: "flex", alignItems: "center", gap: 5 }}>
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
+                        <path
+                          fillRule="evenodd"
+                          clipRule="evenodd"
+                          d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"
+                        />
+                      </svg>
+                      <span>GitHub OAuth App Configuration</span>
+                    </div>
+                    <span
+                      style={{
+                        fontSize: 9,
+                        fontWeight: 600,
+                        padding: "1px 6px",
+                        borderRadius: 10,
+                        background: githubConfigured ? "rgba(34, 197, 94, 0.2)" : "rgba(234, 179, 8, 0.2)",
+                        color: githubConfigured ? "#86efac" : "#fde047",
+                        border: `1px solid ${githubConfigured ? "rgba(34, 197, 94, 0.3)" : "rgba(234, 179, 8, 0.3)"}`,
+                      }}
+                    >
+                      {githubConfigured ? "OAuth Configured" : "Credentials Needed"}
+                    </span>
+                  </div>
+
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <div>
+                      <div style={{ color: "rgba(255,255,255,0.6)", fontSize: 10, marginBottom: 2 }}>
+                        Authorization callback URL:
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <code
+                          style={{
+                            flex: 1,
+                            background: "rgba(0,0,0,0.35)",
+                            color: "#fbcfe8",
+                            padding: "3px 6px",
+                            borderRadius: 4,
+                            fontSize: 10,
+                            wordBreak: "break-all",
+                          }}
+                        >
+                          {authorizedGithubRedirectUri}
+                        </code>
+                        <button
+                          type="button"
+                          onClick={() => copyToClipboard(authorizedGithubRedirectUri, "github_uri")}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 4,
+                            padding: "3px 7px",
+                            borderRadius: 4,
+                            background: "rgba(255,255,255,0.08)",
+                            border: "1px solid rgba(255,255,255,0.15)",
+                            color: "#fff",
+                            fontSize: 10,
+                            cursor: "pointer",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {copiedGithubUri ? <Check size={11} color="#86efac" /> : <Copy size={11} />}
+                          {copiedGithubUri ? "Copied" : "Copy URL"}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div>
+                      <div style={{ color: "rgba(255,255,255,0.6)", fontSize: 10, marginBottom: 2 }}>
+                        Homepage URL:
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <code
+                          style={{
+                            flex: 1,
+                            background: "rgba(0,0,0,0.35)",
+                            color: "#a7f3d0",
+                            padding: "3px 6px",
+                            borderRadius: 4,
+                            fontSize: 10,
+                            wordBreak: "break-all",
+                          }}
+                        >
+                          {currentOrigin}
+                        </code>
+                        <button
+                          type="button"
+                          onClick={() => copyToClipboard(currentOrigin, "origin")}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 4,
+                            padding: "3px 7px",
+                            borderRadius: 4,
+                            background: "rgba(255,255,255,0.08)",
+                            border: "1px solid rgba(255,255,255,0.15)",
+                            color: "#fff",
+                            fontSize: 10,
+                            cursor: "pointer",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {copiedOrigin ? <Check size={11} color="#86efac" /> : <Copy size={11} />}
+                          {copiedOrigin ? "Copied" : "Copy URL"}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div style={{ marginTop: 2 }}>
+                      <a
+                        href="https://github.com/settings/developers"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 4,
+                          color: "#60a5fa",
+                          fontSize: 10,
+                          textDecoration: "none",
+                        }}
+                      >
+                        <ExternalLink size={10} /> Open GitHub Developer Settings (OAuth Apps)
                       </a>
                     </div>
                   </div>

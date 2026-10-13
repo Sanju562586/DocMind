@@ -55,6 +55,9 @@ interface AuthContextType {
   clearAuthErrorDetails: () => void;
   googleClientId: string | null;
   googleConfigured: boolean;
+  githubConfigured: boolean;
+  googleRedirectUri: string | null;
+  githubRedirectUri: string | null;
   openAuthModal: () => void;
   closeAuthModal: () => void;
   loginDemo: (profileKey: string) => void;
@@ -170,6 +173,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [authErrorDetails, setAuthErrorDetails] = useState<AuthErrorDetails | null>(null);
   const [googleClientId, setGoogleClientId] = useState<string | null>(null);
   const [googleConfigured, setGoogleConfigured] = useState(false);
+  const [githubConfigured, setGithubConfigured] = useState(false);
+  const [googleRedirectUri, setGoogleRedirectUri] = useState<string | null>(null);
+  const [githubRedirectUri, setGithubRedirectUri] = useState<string | null>(null);
 
   const clearAuthNotification = useCallback(() => setAuthNotification(null), []);
   const clearAuthErrorDetails = useCallback(() => setAuthErrorDetails(null), []);
@@ -206,7 +212,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       })
       .catch(() => {});
 
-    // 3. Query providers to detect Google OAuth configuration & client ID
+    // 3. Query providers to detect Google & GitHub OAuth configuration & client IDs
     fetch("/api/auth/providers")
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
@@ -214,6 +220,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setGoogleConfigured(Boolean(data.google.configured));
           if (data.google.clientId) {
             setGoogleClientId(data.google.clientId);
+          }
+          if (data.google.redirectUri) {
+            setGoogleRedirectUri(data.google.redirectUri);
+          }
+        }
+        if (data?.github) {
+          setGithubConfigured(Boolean(data.github.configured));
+          if (data.github.redirectUri) {
+            setGithubRedirectUri(data.github.redirectUri);
           }
         }
       })
@@ -228,21 +243,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const redirectUriParam = url.searchParams.get("redirect_uri");
 
       if (authParam) {
-        // Read fresh user from cookie
+        // Read fresh user from cookie or hydrate immediately from server
         const freshUser = parseUser(getCookie("docmind_user"));
         if (freshUser) {
           setUser(freshUser);
           saveUserStorage(freshUser);
         }
-        if (authParam.includes("google")) {
+
+        fetch("/api/auth/session")
+          .then((res) => (res.ok ? res.json() : null))
+          .then((data) => {
+            if (data?.user) {
+              setUser(data.user);
+              saveUserStorage(data.user);
+              setAuthNotification({
+                type: "success",
+                message: authParam.includes("google")
+                  ? `Connected Google account as ${data.user.name} (${data.user.email})!`
+                  : `Connected GitHub account as ${data.user.name}!`,
+              });
+            }
+          })
+          .catch(() => {});
+
+        if (!freshUser) {
           setAuthNotification({
             type: "success",
-            message: `Connected Google account as ${freshUser?.name || "Google User"} (${freshUser?.email || ""})!`,
-          });
-        } else if (authParam.includes("github")) {
-          setAuthNotification({
-            type: "success",
-            message: `Connected GitHub account as ${freshUser?.name || "GitHub User"}!`,
+            message: authParam.includes("google")
+              ? "Successfully connected Google account!"
+              : "Successfully connected GitHub account!",
           });
         }
         url.searchParams.delete("auth");
@@ -252,13 +281,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (errorParam) {
         let msg = "Sign-in encountered an issue.";
         if (errorParam.includes("access_denied")) {
-          msg = "Google sign-in was cancelled by the user.";
+          msg = "Sign-in was cancelled by the user.";
         } else if (errorParam.includes("redirect_uri_mismatch")) {
-          msg = "Google Cloud Console redirect URI mismatch. Please verify Authorized Redirect URIs in your Google Cloud project.";
+          msg = "OAuth redirect URI mismatch. Please verify Authorized Redirect URIs in your developer console.";
         } else if (errorParam.includes("google")) {
           msg = `Google sign-in could not be completed (${descParam || errorParam}).`;
         } else if (errorParam.includes("github")) {
           msg = `GitHub sign-in was not completed (${descParam || errorParam}).`;
+        } else if (errorParam.includes("oauth_state_invalid")) {
+          msg = "OAuth security session mismatch or expired. Please try signing in again.";
         }
 
         setAuthNotification({
@@ -266,15 +297,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           message: msg,
         });
 
-        if (errorParam.includes("google") || errorParam.includes("redirect_uri")) {
-          setAuthErrorDetails({
-            error: errorParam,
-            description: descParam || undefined,
-            redirectUri: redirectUriParam || `${window.location.origin}/api/auth/callback/google`,
-          });
-          // Auto-open modal so user sees diagnostic guide and can fix or demo
-          setIsAuthModalOpen(true);
-        }
+        setAuthErrorDetails({
+          error: errorParam,
+          description: descParam || undefined,
+          redirectUri: redirectUriParam || undefined,
+        });
+        // Auto-open modal so user sees diagnostic guide and can fix or demo
+        setIsAuthModalOpen(true);
 
         url.searchParams.delete("error");
         if (descParam) {
@@ -428,6 +457,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         clearAuthErrorDetails,
         googleClientId,
         googleConfigured,
+        githubConfigured,
+        googleRedirectUri,
+        githubRedirectUri,
         openAuthModal,
         closeAuthModal,
         loginDemo,

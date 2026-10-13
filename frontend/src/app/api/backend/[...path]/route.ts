@@ -12,15 +12,21 @@ const BACKEND_URL = (
   .replace(/\/api$/, "");
 
 function safeParseJson(str: string): any {
-  try {
-    return JSON.parse(str);
-  } catch {
+  if (!str) return null;
+  let cur = str.trim();
+  for (let i = 0; i < 3; i++) {
     try {
-      return JSON.parse(decodeURIComponent(str));
+      return JSON.parse(cur);
+    } catch {}
+    try {
+      const decoded = decodeURIComponent(cur);
+      if (decoded === cur) break;
+      cur = decoded;
     } catch {
-      return null;
+      break;
     }
   }
+  return null;
 }
 
 async function handleProxy(
