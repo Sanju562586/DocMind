@@ -23,7 +23,7 @@ import {
   Tag,
   Globe,
 } from "lucide-react";
-import { format, isToday, isYesterday, parseISO } from "date-fns";
+import { format, isToday, isYesterday, parseISO, isValid } from "date-fns";
 import { motion, AnimatePresence } from "framer-motion";
 import { Session, ApiKeys } from "@/lib/types";
 import { deleteSession, deleteAllSessions, renameSession } from "@/lib/api";
@@ -49,15 +49,22 @@ interface SidebarProps {
   onCloseSidebar: () => void;
 }
 
+function parseDateSafe(val?: string | null): Date {
+  if (!val) return new Date();
+  try {
+    const isoString = val.includes(" ") ? val.replace(" ", "T") : val;
+    const d = parseISO(isoString);
+    if (isValid(d)) return d;
+    const direct = new Date(val);
+    if (isValid(direct)) return direct;
+  } catch {}
+  return new Date();
+}
+
 function groupSessionsByDate(sessions: Session[]): Record<string, Session[]> {
   const groups: Record<string, Session[]> = {};
   for (const s of sessions) {
-    let date: Date;
-    try {
-      date = parseISO(s.updated_at || s.created_at);
-    } catch {
-      date = new Date();
-    }
+    const date = parseDateSafe(s.updated_at || s.created_at);
     let key: string;
     if (isToday(date)) key = "Today";
     else if (isYesterday(date)) key = "Yesterday";
@@ -96,17 +103,22 @@ export default function Sidebar({
   const [editingTitle, setEditingTitle] = useState("");
   const [isRenaming, setIsRenaming] = useState(false);
 
-  // Pinned Sessions State
+  // Pinned Sessions State (scoped per user)
+  const pinnedKey = `docmind_pinned_sessions_${user?.id || "default"}`;
   const [pinnedIds, setPinnedIds] = useState<string[]>([]);
 
   useEffect(() => {
     try {
-      const saved = localStorage.getItem("docmind_pinned_sessions");
+      const saved = localStorage.getItem(pinnedKey);
       if (saved) {
         setPinnedIds(JSON.parse(saved));
+      } else {
+        setPinnedIds([]);
       }
-    } catch {}
-  }, []);
+    } catch {
+      setPinnedIds([]);
+    }
+  }, [pinnedKey]);
 
   // Subject Tag Filter State
   const [selectedTag, setSelectedTag] = useState<string>("All");
@@ -119,7 +131,7 @@ export default function Sidebar({
         ? prev.filter((id) => id !== sessionId)
         : [...prev, sessionId];
       try {
-        localStorage.setItem("docmind_pinned_sessions", JSON.stringify(next));
+        localStorage.setItem(pinnedKey, JSON.stringify(next));
       } catch {}
       return next;
     });

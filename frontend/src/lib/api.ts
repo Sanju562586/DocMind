@@ -280,14 +280,45 @@ export async function createSession(title: string = "New Conversation"): Promise
   }
 }
 
-// LocalStorage caching helpers for permanent cross-session & restart recovery
-const SESSIONS_CACHE_KEY = "docmind_persistent_sessions_v1";
-const MESSAGES_CACHE_PREFIX = "docmind_cached_msgs_";
+// LocalStorage caching helpers for permanent cross-session & restart recovery (strictly scoped per user)
+function getCurrentUserId(): string {
+  if (typeof window === "undefined") return "default_user";
+  try {
+    let cookieUser: any = null;
+    if (typeof document !== "undefined") {
+      const cookies = document.cookie.split(";");
+      for (let c of cookies) {
+        c = c.trim();
+        if (c.startsWith("docmind_user=")) {
+          const val = c.substring("docmind_user=".length);
+          cookieUser = parseUserJson(val);
+          break;
+        }
+      }
+    }
+    let lsUser: any = null;
+    if (typeof localStorage !== "undefined") {
+      lsUser = parseUserJson(localStorage.getItem("docmind_user"));
+    }
+    const effectiveUser = (cookieUser && (!cookieUser.isDemo || !lsUser)) ? cookieUser : (lsUser || cookieUser);
+    return effectiveUser?.id ? String(effectiveUser.id).trim() : "default_user";
+  } catch {
+    return "default_user";
+  }
+}
+
+function getSessionsCacheKey(): string {
+  return `docmind_persistent_sessions_${getCurrentUserId()}`;
+}
+
+function getMessagesCachePrefix(): string {
+  return `docmind_cached_msgs_${getCurrentUserId()}_`;
+}
 
 function getLocalCachedSessions(): Session[] {
   if (typeof window === "undefined") return [];
   try {
-    const raw = localStorage.getItem(SESSIONS_CACHE_KEY);
+    const raw = localStorage.getItem(getSessionsCacheKey());
     return raw ? JSON.parse(raw) : [];
   } catch {
     return [];
@@ -297,14 +328,14 @@ function getLocalCachedSessions(): Session[] {
 function setLocalCachedSessions(sessions: Session[]): void {
   if (typeof window === "undefined" || !Array.isArray(sessions)) return;
   try {
-    localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify(sessions));
+    localStorage.setItem(getSessionsCacheKey(), JSON.stringify(sessions));
   } catch {}
 }
 
 function getLocalCachedMessages(sessionId: string): Message[] {
   if (typeof window === "undefined") return [];
   try {
-    const raw = localStorage.getItem(`${MESSAGES_CACHE_PREFIX}${sessionId}`);
+    const raw = localStorage.getItem(`${getMessagesCachePrefix()}${sessionId}`);
     return raw ? JSON.parse(raw) : [];
   } catch {
     return [];
@@ -314,7 +345,7 @@ function getLocalCachedMessages(sessionId: string): Message[] {
 function setLocalCachedMessages(sessionId: string, msgs: Message[]): void {
   if (typeof window === "undefined" || !Array.isArray(msgs)) return;
   try {
-    localStorage.setItem(`${MESSAGES_CACHE_PREFIX}${sessionId}`, JSON.stringify(msgs));
+    localStorage.setItem(`${getMessagesCachePrefix()}${sessionId}`, JSON.stringify(msgs));
   } catch {}
 }
 
@@ -336,25 +367,24 @@ export async function listSessions(): Promise<Session[]> {
     const res = await fetchWithRetry(`${API_BASE}/sessions`, { cache: "no-store" });
     const remoteSessions = await handleResponse<Session[]>(res, "Failed to fetch sessions");
 
+    // Clean up legacy unscoped key if present
+    try {
+      localStorage.removeItem("docmind_persistent_sessions_v1");
+    } catch {}
+
     // If remote returned valid sessions, update local backup cache
-    if (Array.isArray(remoteSessions) && remoteSessions.length > 0) {
-      setLocalCachedSessions(remoteSessions);
-      return remoteSessions;
+    if (Array.isArray(remoteSessions)) {
+      if (remoteSessions.length > 0) {
+        setLocalCachedSessions(remoteSessions);
+        return remoteSessions;
+      } else {
+        // Current user has no sessions on the server: clear local cache for this user
+        setLocalCachedSessions([]);
+        return [];
+      }
     }
 
-    // If remote returned empty (e.g. cloud spin-down / ephemeral container restart or database reset),
-    // check if we have local cached sessions to restore!
-    const cached = getLocalCachedSessions();
-    if (cached.length > 0) {
-      const sessionsWithMsgs = cached.map((s) => ({
-        ...s,
-        messages: getLocalCachedMessages(s.id),
-      }));
-      restoreSessionsToBackend(sessionsWithMsgs).catch(() => {});
-      return cached;
-    }
-
-    return remoteSessions || [];
+    return [];
   } catch (err) {
     // If backend is offline / unreachable, fallback seamlessly to local browser cache
     const cached = getLocalCachedSessions();
@@ -385,7 +415,8 @@ export async function deleteSession(sessionId: string): Promise<void> {
     const cached = getLocalCachedSessions().filter((s) => s.id !== sessionId);
     setLocalCachedSessions(cached);
     try {
-      localStorage.removeItem(`${MESSAGES_CACHE_PREFIX}${sessionId}`);
+      localStorage.removeItem(`${getMessagesCachePrefix()}${sessionId}`);
+      localStorage.removeItem(`docmind_cached_msgs_${sessionId}`);
     } catch {}
   }
 }
@@ -439,7 +470,8 @@ export async function deleteAllSessions(): Promise<void> {
     await handleResponse<{ status: string }>(res, "Failed to delete all sessions");
   } finally {
     try {
-      localStorage.removeItem(SESSIONS_CACHE_KEY);
+      localStorage.removeItem(getSessionsCacheKey());
+      localStorage.removeItem("docmind_persistent_sessions_v1");
     } catch {}
   }
 }

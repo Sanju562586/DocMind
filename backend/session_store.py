@@ -120,6 +120,10 @@ class SessionStore:
             self._init_postgres()
         else:
             self._init_sqlite()
+        try:
+            self._migrate_npz_chunks_to_db()
+        except Exception as exc:
+            logger.debug('NPZ chunk migration notice: %s', exc)
 
     def _init_sqlite(self):
         os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
@@ -150,6 +154,7 @@ class SessionStore:
                 CREATE TABLE IF NOT EXISTS documents (
                     id TEXT PRIMARY KEY,
                     session_id TEXT NOT NULL,
+                    user_id TEXT DEFAULT 'default_user',
                     filename TEXT NOT NULL,
                     chunk_count INTEGER DEFAULT 0,
                     char_count INTEGER DEFAULT 0,
@@ -159,6 +164,22 @@ class SessionStore:
                     status TEXT DEFAULT 'ready',
                     error_message TEXT,
                     created_at TEXT DEFAULT (datetime('now')),
+                    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+                );
+
+                                CREATE TABLE IF NOT EXISTS document_chunks (
+                    id TEXT PRIMARY KEY,
+                    document_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    parent_index INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    contextual_text TEXT NOT NULL,
+                    parent_id TEXT NOT NULL,
+                    parent_text TEXT NOT NULL,
+                    metadata_json TEXT,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE,
                     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
                 );
 
@@ -190,6 +211,7 @@ class SessionStore:
                 "ALTER TABLE users ADD COLUMN api_keys_json TEXT",
                 "ALTER TABLE documents ADD COLUMN status TEXT DEFAULT 'ready'",
                 "ALTER TABLE documents ADD COLUMN error_message TEXT",
+                "ALTER TABLE documents ADD COLUMN user_id TEXT DEFAULT 'default_user'",
                 "ALTER TABLE sessions ADD COLUMN user_id TEXT DEFAULT 'default_user'",
                 "ALTER TABLE sessions ADD COLUMN is_shared INTEGER DEFAULT 0",
                 "ALTER TABLE sessions ADD COLUMN share_token TEXT",
@@ -201,8 +223,22 @@ class SessionStore:
                 except Exception:
                     pass
 
+            # Backfill documents.user_id from sessions if default_user or null
+            try:
+                conn.execute("""
+                    UPDATE documents 
+                    SET user_id = (SELECT user_id FROM sessions WHERE sessions.id = documents.session_id)
+                    WHERE session_id IN (SELECT id FROM sessions WHERE user_id IS NOT NULL AND user_id != 'default_user')
+                      AND (user_id IS NULL OR user_id = 'default_user')
+                """)
+            except Exception:
+                pass
+
             conn.executescript("""
                 CREATE INDEX IF NOT EXISTS idx_documents_session ON documents(session_id);
+                CREATE INDEX IF NOT EXISTS idx_documents_user ON documents(user_id);
+                CREATE INDEX IF NOT EXISTS idx_chunks_session ON document_chunks(session_id);
+                CREATE INDEX IF NOT EXISTS idx_chunks_doc ON document_chunks(document_id);
                 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
                 CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id, updated_at DESC);
@@ -241,6 +277,7 @@ class SessionStore:
                 CREATE TABLE IF NOT EXISTS documents (
                     id VARCHAR(64) PRIMARY KEY,
                     session_id VARCHAR(64) NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                    user_id VARCHAR(128) DEFAULT 'default_user',
                     filename VARCHAR(255) NOT NULL,
                     chunk_count INT DEFAULT 0,
                     char_count INT DEFAULT 0,
@@ -249,6 +286,20 @@ class SessionStore:
                     file_path TEXT,
                     status VARCHAR(64) DEFAULT 'ready',
                     error_message TEXT,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                );
+
+                                CREATE TABLE IF NOT EXISTS document_chunks (
+                    id VARCHAR(64) PRIMARY KEY,
+                    document_id VARCHAR(64) NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                    session_id VARCHAR(64) NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                    chunk_index INT NOT NULL,
+                    parent_index INT NOT NULL,
+                    text TEXT NOT NULL,
+                    contextual_text TEXT NOT NULL,
+                    parent_id VARCHAR(64) NOT NULL,
+                    parent_text TEXT NOT NULL,
+                    metadata_json TEXT,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 );
 
@@ -273,6 +324,9 @@ class SessionStore:
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_documents_session ON documents(session_id);
+                CREATE INDEX IF NOT EXISTS idx_documents_user ON documents(user_id);
+                CREATE INDEX IF NOT EXISTS idx_chunks_session ON document_chunks(session_id);
+                CREATE INDEX IF NOT EXISTS idx_chunks_doc ON document_chunks(document_id);
                 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
                 CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id, updated_at DESC);
@@ -286,6 +340,7 @@ class SessionStore:
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS api_keys_json TEXT",
                 "ALTER TABLE documents ADD COLUMN IF NOT EXISTS status VARCHAR(64) DEFAULT 'ready'",
                 "ALTER TABLE documents ADD COLUMN IF NOT EXISTS error_message TEXT",
+                "ALTER TABLE documents ADD COLUMN IF NOT EXISTS user_id VARCHAR(128) DEFAULT 'default_user'",
                 "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_id VARCHAR(128) DEFAULT 'default_user'",
                 "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS is_shared BOOLEAN DEFAULT FALSE",
                 "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS share_token VARCHAR(64) UNIQUE",
@@ -296,6 +351,16 @@ class SessionStore:
                     conn.execute(col_sql)
                 except Exception:
                     pass
+
+            try:
+                conn.execute("""
+                    UPDATE documents 
+                    SET user_id = (SELECT user_id FROM sessions WHERE sessions.id = documents.session_id)
+                    WHERE session_id IN (SELECT id FROM sessions WHERE user_id IS NOT NULL AND user_id != 'default_user')
+                      AND (user_id IS NULL OR user_id = 'default_user')
+                """)
+            except Exception:
+                pass
 
         logger.info("PostgreSQL database tables and indexes initialized [OK]")
 
@@ -343,31 +408,18 @@ class SessionStore:
         doc_id = d.get("id") or d.get("doc_id") or ""
         d["id"] = doc_id
         d["doc_id"] = doc_id
+        d["user_id"] = d.get("user_id") or "default_user"
         d["error_message"] = d.get("error_message")
         return d
 
-    @staticmethod
-    def _user_filter(user_id: Optional[str], col: str = "user_id") -> Tuple[str, List[Any]]:
-        if not user_id or user_id in ("all", "*"):
-            return "1=1", []
-
-        # Recognized shared / demo profiles and legacy identities on this deployment
-        shared_identities = [
-            "default_user",
-            "google_118234567890123456789",
-            "user_google_user_gmail_com",
-            "credentials_google_user_gmail_com",
-            "user_alex_rivera_docmind_io",
-            "credentials_alex_rivera_docmind_io",
-            "user_sophia_chen_docmind_io",
-            "credentials_sophia_chen_docmind_io",
-            "user_marcus_vance_docmind_io",
-            "credentials_marcus_vance_docmind_io",
-            "github_583231",
-        ]
-        unique_ids = list(dict.fromkeys([user_id, *shared_identities]))
-        placeholders = ",".join(["?"] * len(unique_ids))
-        return f"({col} IN ({placeholders}) OR {col} IS NULL)", unique_ids
+    def _user_filter(self, user_id: Optional[str] = None, col: str = "user_id") -> Tuple[str, List[Any]]:
+        """Strict user isolation: each user only accesses their own conversations and documents."""
+        if not user_id:
+            return "1=0", []
+        clean_uid = str(user_id).strip()
+        if not clean_uid or clean_uid in ("all", "*"):
+            return "1=0", []
+        return f"{col} = ?", [clean_uid]
 
     def claim_legacy_sessions(self, target_user_id: str) -> int:
         """
@@ -399,7 +451,7 @@ class SessionStore:
     def restore_session_data(self, sessions: List[Dict[str, Any]], user_id: Optional[str] = None) -> Dict[str, int]:
         """
         Idempotently restore sessions, documents, and messages from client-side persistent storage
-        (e.g. after cloud container restarts on free hosting platforms).
+        strictly scoped to target_user.
         """
         restored_sessions = 0
         restored_messages = 0
@@ -411,8 +463,14 @@ class SessionStore:
                 sid = s.get("id") or s.get("session_id")
                 if not sid:
                     continue
+
+                # Ensure we never overwrite or restore into a session owned by another user
+                existing = conn.execute("SELECT user_id FROM sessions WHERE id = ?", (sid,)).fetchone()
+                if existing and existing["user_id"] != target_user:
+                    continue
+
                 title = s.get("title", "Conversation")
-                u_id = s.get("user_id") or target_user
+                u_id = target_user
                 c_at = s.get("created_at") or datetime.utcnow().isoformat()
                 u_at = s.get("updated_at") or c_at
 
@@ -428,11 +486,12 @@ class SessionStore:
                     did = d.get("id") or d.get("doc_id")
                     if did:
                         conn.execute(
-                            """INSERT OR IGNORE INTO documents (id, session_id, filename, chunk_count, char_count, word_count, file_type, file_path, status, created_at)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            """INSERT OR IGNORE INTO documents (id, session_id, user_id, filename, chunk_count, char_count, word_count, file_type, file_path, status, created_at)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                             (
                                 did,
                                 sid,
+                                u_id,
                                 d.get("filename", "document"),
                                 d.get("chunk_count", 0),
                                 d.get("char_count", 0),
@@ -468,7 +527,8 @@ class SessionStore:
 
     @property
     def is_cloud_sync_enabled(self) -> bool:
-        return bool(self.upstash_url and self.upstash_token)
+        # Local storage is prioritized over cloud sync for robust offline persistence
+        return False
 
     def _upstash_cmd(self, command_path: str, body: Optional[Any] = None) -> Optional[Any]:
         """Execute a REST command against Upstash Redis for cloud cross-device persistence."""
@@ -769,15 +829,22 @@ class SessionStore:
         provider: str = "credentials",
     ) -> Dict[str, Any]:
         """Insert or update user record when authenticated, smoothly handling email-based account linking."""
-        clean_email = (email or "").strip().lower() or f"{user_id}@docmind.local"
+        raw_email = (email or "").strip().lower()
+        is_generic_email = not raw_email or raw_email in ("guest@docmind.local", "unknown@docmind.local", "verified@docmind.local")
+        clean_email = f"{user_id}@docmind.local" if is_generic_email else raw_email
         display_name = (name or "").strip() or clean_email.split("@")[0] or "User"
         avatar = image or ("🌐" if provider == "google" else "🐙" if provider == "github" else "👤")
 
         with self._conn() as conn:
             # 1. Check if user with this user_id already exists
             existing_by_id = conn.execute("SELECT id, email, name FROM users WHERE id = ?", (user_id,)).fetchone()
-            # 2. Check if user with this email already exists
-            existing_by_email = conn.execute("SELECT id, email, name FROM users WHERE LOWER(email) = ?", (clean_email,)).fetchone()
+            # 2. Check if user with this email already exists (ONLY for real verified non-generic emails)
+            existing_by_email = None
+            if not is_generic_email:
+                existing_by_email = conn.execute(
+                    "SELECT id, email, name FROM users WHERE LOWER(email) = ? AND id != ?",
+                    (clean_email, user_id)
+                ).fetchone()
 
             if existing_by_id:
                 # Update existing user record by ID
@@ -792,11 +859,12 @@ class SessionStore:
                     (clean_email, display_name, avatar, provider, user_id),
                 )
             elif existing_by_email:
-                # Account linking: email exists under another ID (e.g. earlier guest/credentials session)
+                # Account linking: verified specific email exists under another ID (e.g. earlier credentials session)
                 old_id = existing_by_email["id"]
                 try:
-                    # Migrate existing sessions and global memories to new user_id so user keeps their history
+                    # Migrate existing sessions, documents, and global memories to new user_id so user keeps their history
                     conn.execute("UPDATE sessions SET user_id = ? WHERE user_id = ?", (user_id, old_id))
+                    conn.execute("UPDATE documents SET user_id = ? WHERE user_id = ?", (user_id, old_id))
                     conn.execute("UPDATE global_memory SET user_id = ? WHERE user_id = ?", (user_id, old_id))
                 except Exception as exc:
                     logger.debug("Session migration warning during account linking: %s", exc)
@@ -805,12 +873,13 @@ class SessionStore:
                 conn.execute(
                     """UPDATE users SET
                            id = ?,
+                           email = ?,
                            name = ?,
                            image = ?,
                            provider = ?,
                            last_login_at = datetime('now')
                        WHERE id = ?""",
-                    (user_id, display_name, avatar, provider, old_id),
+                    (user_id, clean_email, display_name, avatar, provider, old_id),
                 )
             else:
                 # Clean insertion of new user
@@ -903,17 +972,19 @@ class SessionStore:
         self._cloud_save_session(session_id=session_id, user_id=u_id, title=title)
         return session_id
 
-    def ensure_session(self, session_id: str, title: str = "New Conversation", user_id: str = "default_user") -> None:
-        """Create session if it does not exist already (idempotent recovery after restarts)."""
+    def ensure_session(self, session_id: str, title: str = "New Conversation", user_id: str = "default_user") -> bool:
+        """Create session if it does not exist already for this user. Returns True if owned or created, False if owned by another user."""
         u_id = user_id or "default_user"
         with self._conn() as conn:
-            existing = conn.execute("SELECT id FROM sessions WHERE id = ?", (session_id,)).fetchone()
-            if not existing:
-                conn.execute(
-                    "INSERT INTO sessions (id, user_id, title) VALUES (?, ?, ?)",
-                    (session_id, u_id, title),
-                )
+            existing = conn.execute("SELECT id, user_id FROM sessions WHERE id = ?", (session_id,)).fetchone()
+            if existing:
+                return existing["user_id"] == u_id
+            conn.execute(
+                "INSERT INTO sessions (id, user_id, title) VALUES (?, ?, ?)",
+                (session_id, u_id, title),
+            )
         self._cloud_save_session(session_id=session_id, user_id=u_id, title=title)
+        return True
 
     def get_session(self, session_id: str, user_id: Optional[str] = None) -> Optional[Dict]:
         try:
@@ -970,23 +1041,15 @@ class SessionStore:
                 logger.debug("Cloud sync notice in list_sessions: %s", exc)
 
         with self._conn() as conn:
-            if user_id:
-                clause, p = self._user_filter(user_id, "s.user_id")
-                rows = conn.execute(
-                    f"""SELECT s.*,
-                              (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) as message_count
-                       FROM sessions s
-                       WHERE {clause}
-                       ORDER BY s.updated_at DESC""",
-                    tuple(p),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """SELECT s.*,
-                              (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) as message_count
-                       FROM sessions s
-                       ORDER BY s.updated_at DESC""",
-                ).fetchall()
+            clause, p = self._user_filter(user_id, "s.user_id")
+            rows = conn.execute(
+                f"""SELECT s.*,
+                          (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) as message_count
+                   FROM sessions s
+                   WHERE {clause}
+                   ORDER BY s.updated_at DESC""",
+                tuple(p),
+            ).fetchall()
 
             sessions = []
             for r in rows:
@@ -1019,8 +1082,13 @@ class SessionStore:
         with self._conn() as conn:
             if user_id:
                 clause, p = self._user_filter(user_id, "user_id")
+                row = conn.execute(f"SELECT id FROM sessions WHERE id = ? AND {clause}", (session_id, *p)).fetchone()
+                if not row:
+                    return
+                self.delete_chunks_for_session(session_id)
                 conn.execute(f"DELETE FROM sessions WHERE id = ? AND {clause}", (session_id, *p))
             else:
+                self.delete_chunks_for_session(session_id)
                 conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
         self._cloud_delete_session(session_id=session_id, user_id=user_id)
 
@@ -1169,12 +1237,16 @@ class SessionStore:
         file_path: str = "",
         status: str = "processing",
         error_message: Optional[str] = None,
+        user_id: Optional[str] = None,
     ):
         with self._conn() as conn:
+            if not user_id:
+                sess_row = conn.execute("SELECT user_id FROM sessions WHERE id = ?", (session_id,)).fetchone()
+                user_id = sess_row["user_id"] if sess_row else "default_user"
             conn.execute(
-                """INSERT INTO documents (id, session_id, filename, chunk_count, char_count, word_count, file_type, file_path, status, error_message)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (doc_id, session_id, filename, chunk_count, char_count, word_count, file_type, file_path, status, error_message),
+                """INSERT INTO documents (id, session_id, user_id, filename, chunk_count, char_count, word_count, file_type, file_path, status, error_message)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (doc_id, session_id, user_id, filename, chunk_count, char_count, word_count, file_type, file_path, status, error_message),
             )
         self.touch_session(session_id)
         self._cloud_save_document(
@@ -1292,32 +1364,61 @@ class SessionStore:
                     logger.warning("Document %s was stuck in 'processing' for >%ds; transitioned to 'error'", doc_id, max_age_seconds)
         return count
 
-    def list_session_documents(self, session_id: str) -> List[Dict]:
+    def list_session_documents(self, session_id: str, user_id: Optional[str] = None) -> List[Dict]:
         try:
             self.cleanup_stuck_documents(max_age_seconds=300)
         except Exception as exc:
             logger.debug("Non-critical stuck document cleanup notice in list_session_documents: %s", exc)
 
         with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM documents WHERE session_id = ? ORDER BY created_at ASC",
-                (session_id,)
-            ).fetchall()
+            if user_id:
+                clause, p = self._user_filter(user_id, "s.user_id")
+                rows = conn.execute(
+                    f"""SELECT d.* FROM documents d
+                       JOIN sessions s ON d.session_id = s.id
+                       WHERE d.session_id = ? AND {clause}
+                       ORDER BY d.created_at ASC""",
+                    (session_id, *p)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM documents WHERE session_id = ? ORDER BY created_at ASC",
+                    (session_id,)
+                ).fetchall()
         return [self._format_doc(r) for r in rows]
 
-    def get_document(self, doc_id: str) -> Optional[Dict]:
+    def get_document(self, doc_id: str, user_id: Optional[str] = None) -> Optional[Dict]:
         with self._conn() as conn:
-            row = conn.execute(
-                "SELECT * FROM documents WHERE id = ?", (doc_id,)
-            ).fetchone()
+            if user_id:
+                clause, p = self._user_filter(user_id, "s.user_id")
+                row = conn.execute(
+                    f"""SELECT d.* FROM documents d
+                       JOIN sessions s ON d.session_id = s.id
+                       WHERE d.id = ? AND {clause}""",
+                    (doc_id, *p)
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT * FROM documents WHERE id = ?", (doc_id,)
+                ).fetchone()
         return self._format_doc(row) if row else None
 
-    def delete_document(self, doc_id: str) -> Optional[str]:
+    def delete_document(self, doc_id: str, user_id: Optional[str] = None) -> Optional[str]:
         with self._conn() as conn:
-            doc = conn.execute("SELECT session_id FROM documents WHERE id = ?", (doc_id,)).fetchone()
+            if user_id:
+                clause, p = self._user_filter(user_id, "s.user_id")
+                doc = conn.execute(
+                    f"""SELECT d.id, d.session_id FROM documents d
+                       JOIN sessions s ON d.session_id = s.id
+                       WHERE d.id = ? AND {clause}""",
+                    (doc_id, *p)
+                ).fetchone()
+            else:
+                doc = conn.execute("SELECT session_id FROM documents WHERE id = ?", (doc_id,)).fetchone()
             if not doc:
                 return None
             session_id = doc["session_id"]
+            self.delete_chunks_for_document(doc_id)
             conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
         self.touch_session(session_id)
         if self.is_cloud_sync_enabled:
@@ -1363,12 +1464,22 @@ class SessionStore:
         )
         return msg_id
 
-    def get_messages(self, session_id: str) -> List[Dict]:
+    def get_messages(self, session_id: str, user_id: Optional[str] = None) -> List[Dict]:
         with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC",
-                (session_id,),
-            ).fetchall()
+            if user_id:
+                clause, p = self._user_filter(user_id, "s.user_id")
+                rows = conn.execute(
+                    f"""SELECT m.* FROM messages m
+                       JOIN sessions s ON m.session_id = s.id
+                       WHERE m.session_id = ? AND {clause}
+                       ORDER BY m.created_at ASC""",
+                    (session_id, *p),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC",
+                    (session_id,),
+                ).fetchall()
 
         # If no messages found locally in SQLite and cloud sync is enabled, rehydrate from Upstash
         if not rows and self.is_cloud_sync_enabled:
@@ -1395,10 +1506,20 @@ class SessionStore:
                         except Exception:
                             pass
                 with self._conn() as conn:
-                    rows = conn.execute(
-                        "SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC",
-                        (session_id,),
-                    ).fetchall()
+                    if user_id:
+                        clause, p = self._user_filter(user_id, "s.user_id")
+                        rows = conn.execute(
+                            f"""SELECT m.* FROM messages m
+                               JOIN sessions s ON m.session_id = s.id
+                               WHERE m.session_id = ? AND {clause}
+                               ORDER BY m.created_at ASC""",
+                            (session_id, *p),
+                        ).fetchall()
+                    else:
+                        rows = conn.execute(
+                            "SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC",
+                            (session_id,),
+                        ).fetchall()
 
         results = []
         for r in rows:
@@ -1437,14 +1558,15 @@ class SessionStore:
         exclude_session_id: Optional[str] = None
     ) -> List[Dict]:
         """Retrieve user's memories from other sessions for indexing and cross-chat recall."""
+        if not user_id:
+            return []
         with self._conn() as conn:
             query = "SELECT * FROM global_memory WHERE 1=1"
             params: List[Any] = []
 
-            if user_id:
-                clause, p = self._user_filter(user_id, "user_id")
-                query += f" AND {clause}"
-                params.extend(p)
+            clause, p = self._user_filter(user_id, "user_id")
+            query += f" AND {clause}"
+            params.extend(p)
 
             if exclude_session_id:
                 query += " AND session_id != ?"
@@ -1456,18 +1578,20 @@ class SessionStore:
 
     def delete_all_sessions(self, user_id: Optional[str] = None):
         """Delete all sessions belonging to user (or all if not specified)."""
+        if not user_id:
+            return
         with self._conn() as conn:
-            if user_id:
-                clause, p = self._user_filter(user_id, "user_id")
-                conn.execute(f"DELETE FROM sessions WHERE {clause}", tuple(p))
-                conn.execute(f"DELETE FROM global_memory WHERE {clause}", tuple(p))
-            else:
-                conn.execute("DELETE FROM sessions")
-                conn.execute("DELETE FROM global_memory")
+            clause, p = self._user_filter(user_id, "user_id")
+            conn.execute(
+                f"DELETE FROM document_chunks WHERE session_id IN (SELECT id FROM sessions WHERE {clause})",
+                tuple(p),
+            )
+            conn.execute(f"DELETE FROM sessions WHERE {clause}", tuple(p))
+            conn.execute(f"DELETE FROM global_memory WHERE {clause}", tuple(p))
         self._cloud_delete_all_sessions(user_id=user_id)
 
     def get_stats(self, user_id: Optional[str] = None) -> Dict[str, Any]:
-        """Aggregate statistics across the platform or per user."""
+        """Aggregate statistics per user."""
         with self._conn() as conn:
             if user_id:
                 clause, p = self._user_filter(user_id, "user_id")
@@ -1499,12 +1623,12 @@ class SessionStore:
                        WHERE {s_clause}""", tuple(s_p)
                 ).fetchone()["s"]
             else:
-                sess_count = conn.execute("SELECT COUNT(*) as c FROM sessions").fetchone()["c"]
-                doc_count = conn.execute("SELECT COUNT(*) as c FROM documents").fetchone()["c"]
-                msg_count = conn.execute("SELECT COUNT(*) as c FROM messages").fetchone()["c"]
-                mem_count = conn.execute("SELECT COUNT(*) as c FROM global_memory").fetchone()["c"]
-                total_words = conn.execute("SELECT COALESCE(SUM(word_count), 0) as s FROM documents").fetchone()["s"]
-                total_chunks = conn.execute("SELECT COALESCE(SUM(chunk_count), 0) as s FROM documents").fetchone()["s"]
+                sess_count = 0
+                doc_count = 0
+                msg_count = 0
+                mem_count = 0
+                total_words = 0
+                total_chunks = 0
 
         return {
             "total_sessions": sess_count,
@@ -1530,9 +1654,165 @@ class SessionStore:
 
     def clear_all_global_memory(self, user_id: Optional[str] = None):
         """Clear all global cross-session memories for user."""
+        if not user_id:
+            return
+        with self._conn() as conn:
+            clause, p = self._user_filter(user_id, "user_id")
+            conn.execute(f"DELETE FROM global_memory WHERE {clause}", tuple(p))
+
+
+    # ──────────────────────────────────────────────
+    # Document Chunks (Local Persistent Storage)
+    # ──────────────────────────────────────────────
+
+    def save_chunks(self, chunks: List[Any]) -> None:
+        """Persist document chunks locally into database for robust local retrieval."""
+        if not chunks:
+            return
+        with self._conn() as conn:
+            for c in chunks:
+                c_id = getattr(c, "id", None) or (c.get("id") if isinstance(c, dict) else None)
+                doc_id = getattr(c, "doc_id", None) or (c.get("doc_id") if isinstance(c, dict) else None)
+                session_id = getattr(c, "session_id", None) or (c.get("session_id") if isinstance(c, dict) else None)
+                chunk_index = getattr(c, "chunk_index", 0) if hasattr(c, "chunk_index") else (c.get("chunk_index", 0) if isinstance(c, dict) else 0)
+                parent_index = getattr(c, "parent_index", 0) if hasattr(c, "parent_index") else (c.get("parent_index", 0) if isinstance(c, dict) else 0)
+                text = getattr(c, "text", "") or (c.get("text", "") if isinstance(c, dict) else "")
+                contextual_text = getattr(c, "contextual_text", "") or (c.get("contextual_text", "") if isinstance(c, dict) else "")
+                parent_id = getattr(c, "parent_id", "") or (c.get("parent_id", "") if isinstance(c, dict) else "")
+                parent_text = getattr(c, "parent_text", "") or (c.get("parent_text", "") if isinstance(c, dict) else "")
+                meta = getattr(c, "metadata", None) or (c.get("metadata", {}) if isinstance(c, dict) else {})
+                meta_json = json.dumps(meta) if meta else None
+
+                conn.execute(
+                    """INSERT OR REPLACE INTO document_chunks 
+                       (id, document_id, session_id, chunk_index, parent_index, text, contextual_text, parent_id, parent_text, metadata_json)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (c_id, doc_id, session_id, chunk_index, parent_index, text, contextual_text, parent_id, parent_text, meta_json),
+                )
+
+    def get_chunks_for_session(self, session_id: str, user_id: Optional[str] = None) -> List[Any]:
+        """Retrieve all persisted chunks for a session ordered by chunk_index."""
+        from chunker import Chunk
         with self._conn() as conn:
             if user_id:
-                clause, p = self._user_filter(user_id, "user_id")
-                conn.execute(f"DELETE FROM global_memory WHERE {clause}", tuple(p))
+                clause, p = self._user_filter(user_id, "s.user_id")
+                rows = conn.execute(
+                    f"""SELECT c.id, c.document_id, c.session_id, c.chunk_index, c.parent_index, c.text, c.contextual_text, c.parent_id, c.parent_text, c.metadata_json 
+                       FROM document_chunks c
+                       JOIN sessions s ON c.session_id = s.id
+                       WHERE c.session_id = ? AND {clause}
+                       ORDER BY c.chunk_index ASC""",
+                    (session_id, *p),
+                ).fetchall()
             else:
-                conn.execute("DELETE FROM global_memory")
+                rows = conn.execute(
+                    """SELECT id, document_id, session_id, chunk_index, parent_index, text, contextual_text, parent_id, parent_text, metadata_json 
+                       FROM document_chunks 
+                       WHERE session_id = ? 
+                       ORDER BY chunk_index ASC""",
+                    (session_id,),
+                ).fetchall()
+            chunks = []
+            for r in rows:
+                meta = json.loads(r["metadata_json"]) if r["metadata_json"] else {}
+                chunk = Chunk(
+                    id=r["id"],
+                    text=r["text"],
+                    contextual_text=r["contextual_text"],
+                    parent_id=r["parent_id"],
+                    parent_text=r["parent_text"],
+                    doc_id=r["document_id"],
+                    session_id=r["session_id"],
+                    chunk_index=r["chunk_index"],
+                    parent_index=r["parent_index"],
+                    metadata=meta,
+                )
+                chunks.append(chunk)
+            return chunks
+
+    def get_chunks_for_document(self, doc_id: str, user_id: Optional[str] = None) -> List[Any]:
+        """Retrieve all persisted chunks for a specific document."""
+        from chunker import Chunk
+        with self._conn() as conn:
+            if user_id:
+                clause, p = self._user_filter(user_id, "s.user_id")
+                rows = conn.execute(
+                    f"""SELECT c.id, c.document_id, c.session_id, c.chunk_index, c.parent_index, c.text, c.contextual_text, c.parent_id, c.parent_text, c.metadata_json 
+                       FROM document_chunks c
+                       JOIN sessions s ON c.session_id = s.id
+                       WHERE c.document_id = ? AND {clause}
+                       ORDER BY c.chunk_index ASC""",
+                    (doc_id, *p),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT id, document_id, session_id, chunk_index, parent_index, text, contextual_text, parent_id, parent_text, metadata_json 
+                       FROM document_chunks 
+                       WHERE document_id = ? 
+                       ORDER BY chunk_index ASC""",
+                    (doc_id,),
+                ).fetchall()
+            chunks = []
+            for r in rows:
+                meta = json.loads(r["metadata_json"]) if r["metadata_json"] else {}
+                chunk = Chunk(
+                    id=r["id"],
+                    text=r["text"],
+                    contextual_text=r["contextual_text"],
+                    parent_id=r["parent_id"],
+                    parent_text=r["parent_text"],
+                    doc_id=r["document_id"],
+                    session_id=r["session_id"],
+                    chunk_index=r["chunk_index"],
+                    parent_index=r["parent_index"],
+                    metadata=meta,
+                )
+                chunks.append(chunk)
+            return chunks
+
+    def delete_chunks_for_session(self, session_id: str) -> None:
+        with self._conn() as conn:
+            conn.execute("DELETE FROM document_chunks WHERE session_id = ?", (session_id,))
+
+    def delete_chunks_for_document(self, doc_id: str) -> None:
+        with self._conn() as conn:
+            conn.execute("DELETE FROM document_chunks WHERE document_id = ?", (doc_id,))
+
+    def _migrate_npz_chunks_to_db(self):
+        """Auto-scan disk index directories and populate document_chunks table with any existing chunks."""
+        index_dirs = [
+            os.path.join(os.path.dirname(os.path.abspath(self.db_path)), "indexes"),
+            "./data/indexes",
+            "./backend/data/indexes",
+            "data/indexes",
+        ]
+        seen_paths = set()
+        total_migrated = 0
+        for d in index_dirs:
+            abs_d = os.path.abspath(d)
+            if not os.path.isdir(abs_d) or abs_d in seen_paths:
+                continue
+            seen_paths.add(abs_d)
+            for fname in os.listdir(abs_d):
+                if fname.startswith("session_") and fname.endswith(".npz"):
+                    sid = fname[len("session_"):-len(".npz")]
+                    npz_path = os.path.join(abs_d, fname)
+                    try:
+                        with self._conn() as conn:
+                            existing = conn.execute(
+                                "SELECT COUNT(*) as c FROM document_chunks WHERE session_id = ?", (sid,)
+                            ).fetchone()
+                            if existing and existing["c"] > 0:
+                                continue
+                        import numpy as np
+                        with np.load(npz_path, allow_pickle=True) as data:
+                            chunks_json_str = str(data["chunks_json"])
+                        chunks_data = json.loads(chunks_json_str)
+                        if chunks_data:
+                            self.save_chunks(chunks_data)
+                            total_migrated += len(chunks_data)
+                            logger.info("Migrated %d chunks from %s into document_chunks table [OK]", len(chunks_data), fname)
+                    except Exception as exc:
+                        logger.debug("NPZ chunk migration notice for %s: %s", fname, exc)
+        if total_migrated > 0:
+            logger.info("Total %d legacy document chunks migrated to local database [OK]", total_migrated)

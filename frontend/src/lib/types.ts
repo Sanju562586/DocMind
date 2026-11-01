@@ -24,6 +24,7 @@ export interface Document {
   id?: string;
   doc_id: string;
   session_id: string;
+  user_id?: string;
   filename: string;
   chunk_count: number;
   char_count: number;

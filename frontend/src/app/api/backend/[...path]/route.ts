@@ -56,12 +56,7 @@ async function handleProxy(
     }
   });
 
-  // 1. Inject Authenticated User Identity from signed JWT or verified cookie
-  const sessionToken = req.cookies.get("docmind_session")?.value;
-  if (sessionToken) {
-    headers.set("Authorization", `Bearer ${sessionToken}`);
-  }
-
+  // 1. Determine Authenticated User Identity
   let userId = "";
   const userCookie = req.cookies.get("docmind_user")?.value;
   if (userCookie) {
@@ -97,6 +92,24 @@ async function handleProxy(
   const clientUserProvider = req.headers.get("x-user-provider");
   if (clientUserProvider && !headers.get("X-User-Provider")) {
     headers.set("X-User-Provider", clientUserProvider);
+  }
+
+  // Inject signed JWT session token only if it matches active user
+  const sessionToken = req.cookies.get("docmind_session")?.value;
+  if (sessionToken) {
+    try {
+      const parts = sessionToken.split(".");
+      if (parts.length === 3) {
+        const payloadJson = Buffer.from(parts[1], "base64url").toString("utf-8");
+        const payload = JSON.parse(payloadJson);
+        const tokenSub = payload.sub || payload.user_id;
+        if (!userId || !tokenSub || tokenSub === userId) {
+          headers.set("Authorization", `Bearer ${sessionToken}`);
+        }
+      }
+    } catch {
+      // Don't forward invalid token
+    }
   }
 
   // 2. Inject Secure HTTP-only API Keys server-to-server (User-scoped cookie first)

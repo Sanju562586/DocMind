@@ -363,7 +363,7 @@ export default function HomePage() {
       const savedMemory = localStorage.getItem("docmind_use_global_memory");
       if (savedMemory !== null) setUseGlobalMemory(savedMemory === "true");
     } catch {}
-    loadSessionsList();
+    loadSessionsList(true);
     verifyHealth();
 
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -420,8 +420,10 @@ export default function HomePage() {
 
   // ── Sync user-isolated sessions & API keys when identity changes ──────────
   useEffect(() => {
+    setActiveSession(null);
+    setMessages([]);
+    loadSessionsList(true);
     if (user?.id) {
-      loadSessionsList(true);
       fetchKeyStatus()
         .then((status) => {
           if (status.keys) {
@@ -459,11 +461,15 @@ export default function HomePage() {
       const sessList = await listSessions();
       setSessions(sessList);
       setBackendStatus("healthy");
+      if (sessList.length === 0) {
+        setActiveSession(null);
+        setMessages([]);
+        return;
+      }
       if (autoRestoreLast && typeof window !== "undefined") {
         try {
-          const lastId =
-            (user?.id ? localStorage.getItem(`docmind_last_session_${user.id}`) : null) ||
-            localStorage.getItem("docmind_last_session");
+          const userKey = user?.id ? `docmind_last_session_${user.id}` : "docmind_last_session_guest";
+          const lastId = localStorage.getItem(userKey);
           if (lastId) {
             const target = sessList.find((s) => s.id === lastId);
             if (target) {
@@ -472,7 +478,7 @@ export default function HomePage() {
             }
           }
           // Auto-select most recent active conversation if none chosen
-          if (!activeSession && sessList.length > 0) {
+          if (sessList.length > 0) {
             handleSelectSession(sessList[0]);
           }
         } catch {}
@@ -523,8 +529,8 @@ export default function HomePage() {
     setActiveSession(session);
     if (typeof window !== "undefined") {
       try {
-        if (user?.id) localStorage.setItem(`docmind_last_session_${user.id}`, session.id);
-        localStorage.setItem("docmind_last_session", session.id);
+        const userKey = user?.id ? `docmind_last_session_${user.id}` : "docmind_last_session_guest";
+        localStorage.setItem(userKey, session.id);
       } catch {}
     }
     setIsLoadingMessages(true);
@@ -552,8 +558,8 @@ export default function HomePage() {
       const newId = await createSession("New Conversation");
       if (typeof window !== "undefined") {
         try {
-          if (user?.id) localStorage.setItem(`docmind_last_session_${user.id}`, newId);
-          localStorage.setItem("docmind_last_session", newId);
+          const userKey = user?.id ? `docmind_last_session_${user.id}` : "docmind_last_session_guest";
+          localStorage.setItem(userKey, newId);
         } catch {}
       }
       const updatedList = await listSessions();

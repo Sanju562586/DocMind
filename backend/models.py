@@ -48,6 +48,7 @@ class DocumentResponse(BaseModel):
     id: Optional[str] = None
     doc_id: str
     session_id: str
+    user_id: Optional[str] = None
     filename: str
     chunk_count: int
     char_count: int
@@ -94,6 +95,7 @@ class MessageResponse(BaseModel):
 
 class SessionResponse(BaseModel):
     id: str
+    user_id: Optional[str] = None
     title: str
     created_at: str
     updated_at: str

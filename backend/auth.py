@@ -143,13 +143,11 @@ def extract_user_identity(request: Request, secret: str) -> Dict[str, str]:
 
     # 4. Fallback: Development / Guest request headers
     user_id = request.headers.get("X-User-Id") or "default_user"
-    email = request.headers.get("X-User-Email") or "guest@docmind.local"
+    user_id = user_id.replace("/", "").replace("\\", "").replace("..", "").strip() or "default_user"
+    email = request.headers.get("X-User-Email") or (f"{user_id}@docmind.local" if user_id != "default_user" else "guest@docmind.local")
     name = request.headers.get("X-User-Name") or "Guest User"
     image = request.headers.get("X-User-Image") or "👤"
     provider = request.headers.get("X-User-Provider") or "guest"
-
-    # Sanitize user_id against path traversal
-    user_id = user_id.replace("/", "").replace("\\", "").replace("..", "").strip() or "default_user"
 
     return {
         "user_id": user_id,
