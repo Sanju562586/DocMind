@@ -37,7 +37,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-from chunker import HierarchicalSemanticChunker
+from chunker import StructureAwareChunker, HierarchicalSemanticChunker
 from config import get_settings
 from document_parser import DocumentParser
 from llm_router import LLMRouter, LLM_STREAM_RESET
@@ -60,7 +60,7 @@ logger = logging.getLogger("docmind")
 settings = get_settings()
 
 parser: Optional[DocumentParser] = None
-chunker: Optional[HierarchicalSemanticChunker] = None
+chunker: Optional[StructureAwareChunker] = None
 retriever: Optional[HybridRetriever] = None
 store: Optional[SessionStore] = None
 router_llm: Optional[LLMRouter] = None
@@ -90,6 +90,8 @@ async def _process_document_background(d_id: str, s_id: str, f_path: str, f_name
             asyncio.to_thread(chunker.chunk_document, doc_text, d_id, s_id, metadata),
             timeout=settings.parse_timeout,
         )
+        # Persist chunks to local database
+        await asyncio.to_thread(store.save_chunks, chunks)
         await asyncio.wait_for(
             asyncio.to_thread(retriever.index_session_chunks, s_id, chunks),
             timeout=settings.index_timeout,
@@ -174,7 +176,7 @@ async def lifespan(app: FastAPI):
     await task_queue.start()
 
     parser = DocumentParser()
-    chunker = HierarchicalSemanticChunker(
+    chunker = StructureAwareChunker(
         parent_chunk_size=settings.parent_chunk_size,
         child_chunk_size=settings.child_chunk_size,
         semantic_threshold=settings.semantic_threshold,
@@ -185,6 +187,7 @@ async def lifespan(app: FastAPI):
         candidates_k=settings.retrieval_candidates,
         max_cached_sessions=settings.max_cached_sessions,
         load_neural=settings.enable_neural_models,
+        store=store,
     )
     router_llm = LLMRouter()
 
@@ -565,11 +568,6 @@ async def create_session(body: SessionCreate, request: Request):
 @app.get("/api/sessions")
 async def list_sessions(request: Request):
     user = _get_user_info(request)
-    if store and user.get("user_id") and user["user_id"] != "default_user":
-        try:
-            store.claim_legacy_sessions(user["user_id"])
-        except Exception as exc:
-            logger.debug("Non-critical legacy session claim notice: %s", exc)
     return store.list_sessions(user_id=user["user_id"])
 
 
@@ -656,8 +654,8 @@ async def get_messages(session_id: str, request: Request):
     user = _get_user_info(request)
     session = store.get_session(session_id, user_id=user["user_id"])
     if not session:
-        return []
-    return store.get_messages(session_id)
+        raise HTTPException(status_code=404, detail="Session not found or unauthorized")
+    return store.get_messages(session_id, user_id=user["user_id"])
 
 
 # ──────────────────────────────────────────────
@@ -750,9 +748,13 @@ async def upload_document_to_session(
     user = _get_user_info(request)
     session = store.get_session(session_id, user_id=user["user_id"])
     if not session:
-        # Idempotently recreate session so uploads never fail if server restarted
-        store.ensure_session(session_id, title="New Conversation", user_id=user["user_id"])
+        # Check if session can be created or owned by this user
+        owned = store.ensure_session(session_id, title="New Conversation", user_id=user["user_id"])
+        if not owned:
+            raise HTTPException(status_code=403, detail="Unauthorized access to session")
         session = store.get_session(session_id, user_id=user["user_id"])
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or unauthorized")
 
     # Read uploaded bytes with size bounds checking
     content = await file.read()
@@ -789,6 +791,7 @@ async def upload_document_to_session(
         file_type=file_type,
         file_path=file_path,
         status="processing",
+        user_id=user["user_id"],
     )
 
     # Automatically update session title if default
@@ -828,22 +831,22 @@ async def list_session_documents(session_id: str, request: Request):
     user = _get_user_info(request)
     session = store.get_session(session_id, user_id=user["user_id"])
     if not session:
-        return []
-    return store.list_session_documents(session_id)
+        raise HTTPException(status_code=404, detail="Session not found or unauthorized")
+    return store.list_session_documents(session_id, user_id=user["user_id"])
 
 
 @app.delete("/api/documents/{doc_id}")
 async def delete_document(doc_id: str, request: Request):
     user = _get_user_info(request)
-    doc = store.get_document(doc_id)
+    doc = store.get_document(doc_id, user_id=user["user_id"])
     if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
+        raise HTTPException(status_code=404, detail="Document not found or unauthorized")
     session = store.get_session(doc["session_id"], user_id=user["user_id"])
     if not session:
         raise HTTPException(status_code=403, detail="Unauthorized document access")
 
     session_id = doc["session_id"]
-    store.delete_document(doc_id)
+    store.delete_document(doc_id, user_id=user["user_id"])
     retriever.remove_document_from_session(session_id, doc_id)
     if doc.get("file_path"):
         if storage:
@@ -860,9 +863,9 @@ async def delete_document(doc_id: str, request: Request):
 async def retry_document_processing(doc_id: str, request: Request):
     """Manually re-trigger background processing for a stuck or errored document."""
     user = _get_user_info(request)
-    doc = store.get_document(doc_id)
+    doc = store.get_document(doc_id, user_id=user["user_id"])
     if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
+        raise HTTPException(status_code=404, detail="Document not found or unauthorized")
     session = store.get_session(doc["session_id"], user_id=user["user_id"])
     if not session:
         raise HTTPException(status_code=403, detail="Unauthorized document access")
@@ -922,68 +925,33 @@ async def retry_document_processing(doc_id: str, request: Request):
 # Chat & Global Cross-Session Memory Streaming
 # ──────────────────────────────────────────────
 
-SYSTEM_PROMPT_TEMPLATE = """You are DocMind, an intelligent, domain-agnostic document assistant designed to provide accurate, comprehensive, and well-structured answers in a standard, formal, and professional manner using simple, clear, and plain language.
+SYSTEM_PROMPT_TEMPLATE = """You are DocMind, an intelligent document assistant that explains things simply, clearly, and directly.
 
-## CORE PRINCIPLES: FORMAL TONE IN SIMPLE, UNDERSTANDABLE WORDS
-1. **Professional & Objective Demeanor**: Maintain a standard, formal, and objective tone. Avoid slang, colloquialisms, or chatty filler.
-2. **Simple, Accessible Language**: Write with clarity using plain, direct vocabulary. Avoid dense academic jargon or convoluted phrasing. If a specialized term is necessary, explain it immediately in simple words.
-3. **Strict Grounding**: Base all factual statements strictly on the provided document context. Do not invent, assume, or extrapolate beyond the text.
-4. **Synthesize with Precision**: Synthesize and organize information coherently in your own words rather than dumping raw chunks verbatim.
+## CORE INSTRUCTIONS: EXPLAIN SIMPLY & NATURALLY
+1. **Explain in Very Simple, Everyday Words**:
+   - Use plain, simple language that is clear and effortless to read.
+   - Avoid dense academic jargon, overly formal corporate phrasing, and robotic filler words.
+   - If a technical term is necessary, explain what it means in simple terms right away with a clear example.
+   - Break down complex ideas into simple, digestible steps or points.
 
-## ADAPTIVE RESPONSE ARCHITECTURE
-Always adapt your response structure dynamically to the user's inquiry intent:
+2. **No Forced Sections or Robotic Templates**:
+   - DO NOT use artificial section titles like "Executive Overview", "Key Points & Core Findings", "Detailed Insights & Analysis", or "Conclusion & Takeaways".
+   - Answer the user's question directly right from the start.
+   - Keep answers natural, engaging, and focused on what the user actually wants to know.
 
-### 1. Enumeration, Listing & Extraction Queries (e.g., "list all...", "what are all...", "show every...", "outline all...")
-- **Exhaustive & Complete Recall**: You MUST extract and list EVERY SINGLE relevant item present across the document context and pages. Never sample a partial subset, never stop early, and NEVER truncate with "etc." or "...". If there are N items across the pages, your list MUST contain all N items.
-- **Natural Chronological Order**: Present items strictly in document order using sequential numbering (`1. `, `2. `, `3. `).
-- **Consistent Item Structure**:
-  Format each item with its title or label, source page/section citation, and concise description:
-  `1. **[Item Title / Section Heading]** ([Page X])`
-  Followed by a clear, simple summary of the item's core details or description as stated in the document.
-- **Introductory Scope**: Open with a brief, clear introductory line noting the total count found (e.g., "The document outlines the following [N] [items] across its sections:").
+3. **Clean, Readable Layout**:
+   - Use short, comfortable paragraphs (2-3 sentences each).
+   - Use bullet points (`-`) when listing items, key takeaways, or steps to keep things clean and easy to scan.
+   - Use **bold** sparingly for key terms so important points stand out naturally.
 
-### 2. Overview, Synthesis & Deep Summary Queries (e.g., "summarize this document", "explain the findings", "overview of...")
-Structure the response logically:
-- **Executive Overview**: A formal, high-level summary of the central topic or document in simple terms.
-- **Key Points & Core Findings**: Structured bullet points highlighting the primary themes, metrics, or arguments.
-- **Detailed Insights & Analysis**: Clear explanation of underlying context, methodologies, or implications.
-- **Conclusion & Takeaways**: Concise formal summary highlighting the most critical conclusions.
+4. **Document Grounding & Natural Citations**:
+   - Ground all factual information strictly in the provided document context.
+   - When citing documents or page numbers, mention them naturally (e.g. `(Page 3)` or `[DocName, Page 5]`).
 
-### 3. Pinpoint, Factoid & Lookup Queries (e.g., "what is the date?", "who signed?", "what is the fee?")
-- **Direct Answer First**: Provide the exact, direct answer in the very first sentence with clear, unambiguous language.
-- **Supporting Evidence & Citation**: Follow with brief supporting context and exact document source/page citation (e.g., `[Page 3]`).
-
-### 4. Comparison & Analytical Queries (e.g., "compare X and Y", "what are the differences?")
-- Use a structured Markdown comparison table or parallel comparative headings.
-- Explicitly contrast key dimensions, criteria, advantages, and tradeoffs.
-
-## CLEAN MARKDOWN FORMATTING RULES
-- Always place clean blank lines before and after headings (e.g. `\n\n### Heading Title\n\n`). Never attach a heading directly to preceding text.
-- Always include a space after markdown hashes (e.g. `### Heading`).
-- Always close bold tags `**text**` cleanly before starting a new block or line.
-- Never split bold or italic formatting across paragraph breaks.
-- Use **`-`** for all bullet points. Never use `*` or literal bullet characters.
-- Format definitions as `- **Term Name:** Simple explanation.` on a single line.
-- Format document citations cleanly as `[Document Name, Page X]` or `[Page X]` attached to the relevant sentence.
-
-## DOCUMENT-GROUNDING PROTOCOL
-Follow this decision flow for every user query:
-
-### STEP 1 — Grounding in Received Context
-Answer using the facts and information present in the CURRENT CHAT DOCUMENT CONTEXT and CROSS-SESSION GLOBAL MEMORY.
-- Ground all facts strictly in the context.
-- Mention document and page citations naturally where appropriate.
-
-### STEP 2 — If the Answer is NOT in the Documents
-If the user asks about something not mentioned in the provided documents, begin your response with this exact disclosure block:
-
----
-⚠️ **This information is not present in the provided document(s).**
-The following answer is provided in a standard, formal manner based on general knowledge using simple words.
-
----
-
-Then provide a standard, formal explanation in plain and understandable language.
+5. **When Information is Not in the Documents**:
+   - If the user asks about something not covered in the attached document(s), state it simply:
+     "This isn't mentioned in your uploaded documents, but here is a simple explanation:"
+   - Then provide a clear, simple answer based on general knowledge in plain everyday words.
 
 ============================================================
 CURRENT CHAT DOCUMENT CONTEXT:
@@ -1011,7 +979,9 @@ async def chat(request: Request, body: ChatRequest):
 
     session = store.get_session(body.session_id, user_id=user["user_id"])
     if not session:
-        store.ensure_session(body.session_id, title="New Conversation", user_id=user["user_id"])
+        owned = store.ensure_session(body.session_id, title="New Conversation", user_id=user["user_id"])
+        if not owned:
+            raise HTTPException(status_code=403, detail="Unauthorized access to session")
         session = store.get_session(body.session_id, user_id=user["user_id"])
     if not session:
         raise HTTPException(status_code=404, detail="Session not found or unauthorized")
@@ -1045,6 +1015,19 @@ async def chat(request: Request, body: ChatRequest):
             retriever.retrieve, body.session_id, query, additional_session_ids=None
         )
         recalled_memories = []
+
+    # If no chunks were retrieved but session documents exist, attempt recovery from local database chunks
+    if not retrieved_chunks and session.get("documents"):
+        try:
+            db_chunks = await asyncio.to_thread(store.get_chunks_for_session, body.session_id, user["user_id"])
+            if db_chunks:
+                logger.info("Rehydrating session %s retriever index from %d database chunks", body.session_id, len(db_chunks))
+                await asyncio.to_thread(retriever.index_session_chunks, body.session_id, db_chunks)
+                retrieved_chunks = await asyncio.to_thread(
+                    retriever.retrieve, body.session_id, query, additional_session_ids=other_session_ids if use_global else None
+                )
+        except Exception as rec_err:
+            logger.warning("Session chunk rehydration notice: %s", rec_err)
 
     # Build Document Context
     if retrieved_chunks:
@@ -1081,7 +1064,7 @@ async def chat(request: Request, body: ChatRequest):
     )
 
     # Build message array
-    history = store.get_messages(body.session_id)
+    history = store.get_messages(body.session_id, user_id=user["user_id"])
     messages = [{"role": "system", "content": system_prompt}]
     for msg in history[-10:]:
         if msg["role"] in ("user", "assistant"):
@@ -1197,9 +1180,6 @@ async def summarize_session(session_id: str, request: Request):
 
     session = store.get_session(session_id, user_id=user["user_id"])
     if not session:
-        store.ensure_session(session_id, title="New Conversation", user_id=user["user_id"])
-        session = store.get_session(session_id, user_id=user["user_id"])
-    if not session:
         raise HTTPException(status_code=404, detail="Session not found or unauthorized")
 
     docs = session.get("documents", [])
@@ -1219,21 +1199,16 @@ async def summarize_session(session_id: str, request: Request):
         {
             "role": "system",
             "content": (
-                "You are DocMind. Generate a comprehensive, well-structured document summary in a standard, formal, and professional manner, using simple and easily understandable words.\n\n"
+                "You are DocMind. Summarize the provided document(s) in a very simple, clear, and easy-to-understand manner.\n\n"
                 "Summary Guidelines:\n"
-                "- Tone & Style: Maintain an objective, formal, and standard tone while strictly using simple, clear, and plain language.\n"
-                "- Vocabulary: Avoid dense academic jargon or overly complex phrasing. If a specialized term is necessary, explain it immediately in simple words.\n"
-                "- Synthesis: Synthesize the material logically and concisely rather than copying raw text verbatim.\n\n"
-                "Structure your summary with:\n"
-                "1. 📌 Executive Overview (a standard, formal overview of the document in simple, clear terms)\n"
-                "2. 📋 Key Findings & Core Topics (structured, easy-to-understand bullet points covering the main points)\n"
-                "3. 💡 Detailed Analysis & Explanations (step-by-step breakdown of essential concepts in plain words)\n"
-                "4. 🎯 Conclusion & Key Takeaways (the most crucial takeaways and conclusions presented clearly)\n\n"
-                "Format using clean Markdown with bold terms and organized bullet points.\n\n"
+                "- Explain in plain, everyday language without stiff corporate phrasing or artificial headings.\n"
+                "- Start directly with a simple overview of what the document is about.\n"
+                "- Present the main points using clear, easy-to-read bullet points (`-`).\n"
+                "- Highlight important takeaways clearly and concisely.\n\n"
                 f"DOCUMENTS CONTENT:\n{context}"
             ),
         },
-        {"role": "user", "content": "Please provide a standard and formal summary of the attached document(s) in simple, understandable words."},
+        {"role": "user", "content": "Please give a simple, easy-to-understand summary of the attached document(s)."},
     ]
 
     async def generate():
@@ -1258,7 +1233,7 @@ async def summarize_session(session_id: str, request: Request):
             if full.strip():
                 if settings.enable_metrics:
                     metrics.record_tokens("llm_stream", max(1, len(full) // 4))
-                store.save_message(session_id, "user", "Please provide a standard and formal summary of the attached document(s) in simple, understandable words.")
+                store.save_message(session_id, "user", "Please give a simple, easy-to-understand summary of the attached document(s).")
                 store.save_message(session_id, "assistant", full)
                 store.save_global_memory(
                     session_id,
@@ -1322,6 +1297,7 @@ async def ingest_url_to_session(
         file_type="url",
         file_path=url,
         status="processing",
+        user_id=user["user_id"],
     )
 
     async def _process_url_background(d_id: str, s_id: str, text: str, meta: dict):
@@ -1449,18 +1425,17 @@ async def compare_documents(session_id: str, request: Request, body: CompareRequ
         doc_contexts.append(f"### DOCUMENT: {d['filename']}\n{text_summary}")
 
     comparison_prompt = (
-        f"You are DocMind. Compare these documents in a standard, formal, and structured manner using simple and easily understandable words.\n"
+        f"You are DocMind. Compare these documents in a very simple, clear, and easy-to-understand manner.\n"
         f"Focus Area: {body.focus_topic}\n\n"
         f"DOCUMENT CONTENTS:\n" + "\n\n".join(doc_contexts) + "\n\n"
-        f"Provide your output in clean Markdown with:\n"
-        f"1. 📌 Overview of the Comparison (formal yet simple overview)\n"
-        f"2. 📊 Structured Comparison Table (clear and easy to read)\n"
-        f"3. 💡 Key Similarities & Notable Differences (explained in plain, simple language)\n"
-        f"4. 🎯 Summary & Key Takeaways (standard, formal conclusion in everyday terms)"
+        f"Guidelines:\n"
+        f"- Provide a simple, straightforward explanation comparing the documents on '{body.focus_topic}'.\n"
+        f"- Include a clean, easy-to-read Markdown comparison table.\n"
+        f"- Use simple bullet points to explain key similarities and differences in plain everyday words without dense jargon."
     )
 
     messages = [
-        {"role": "system", "content": "You are a helpful document assistant that explains comparisons in a standard, formal manner using simple, clear, and understandable language."},
+        {"role": "system", "content": "You are a helpful assistant that explains document comparisons simply, clearly, and directly in plain language."},
         {"role": "user", "content": comparison_prompt},
     ]
 
