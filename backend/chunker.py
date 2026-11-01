@@ -1,19 +1,23 @@
 """
-Hierarchical Semantic Chunker
-─────────────────────────────
+Structure-Aware Document Chunker
+─────────────────────────────────
 Strategy:
-  1. Structural split  → "parent" chunks  (~512 tokens, preserves sections/paragraphs)
-  2. Semantic split    → "child"  chunks  (~128 tokens, topic-boundary detection via
-                          cosine distance between adjacent sentence representations)
-  3. Contextual prefix → each child chunk gets a prefix like
-                          "Context: [Document: title] [Section: header] " before embedding,
-                          so distant chunks that share a topic area still surface together.
-  4. Parent-child link → each child stores its parent's full text for LLM context expansion.
-
-Why this captures distant relationships:
-  • BM25 benefits from the contextual prefix keywords (e.g., section title words)
-  • Dense embeddings capture semantic overlap between child & distant peers
-  • On retrieval, we inject the full parent text → LLM gets broad context, not just snippet
+  1. Structural Syntax Parsing:
+     - Headings (Markdown '#', numbered outlines '1.1', 'Section X', 'Unit Y')
+     - Tables (Markdown pipe tables, tab/grid tables) preserved atomically
+     - Code blocks (fenced ```...```) preserved intact
+     - Lists (bullet points, numbered steps) grouped logically
+     - Page & slide boundaries ('--- [Page X] ---')
+     - Paragraphs (blank-line delimited prose)
+  2. Hierarchical Breadcrumb Tracking:
+     - Maintains heading tree (e.g. "Chapter 1 > 1.2 Architecture > Key Components")
+     - Attaches breadcrumb metadata and section hierarchy to every block and chunk
+  3. Two-Tier Hierarchical Structure:
+     - Parent Sections: Cohesive high-level sections (headings + enclosed text, ~512-800 tokens)
+     - Child Chunks: Granular structure-aware chunks (~150-250 tokens) that NEVER slice
+       tables mid-row or code blocks mid-body, and split long prose cleanly at sentence boundaries.
+  4. Contextual Prefix:
+     - Enriches embeddings and BM25 keywords with document title, page number, breadcrumb, and structural type.
 """
 
 import re
@@ -21,20 +25,11 @@ import uuid
 import math
 import logging
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any
+from typing import List, Dict, Optional, Tuple, Any
 from collections import Counter
-
-# pyrefly: ignore [missing-import]
 import numpy as np
 
 logger = logging.getLogger(__name__)
-
-# Graceful import of SentenceTransformer
-_HAVE_SENTENCE_TRANSFORMERS = False
-try:
-    _HAVE_SENTENCE_TRANSFORMERS = True
-except ImportError:
-    logger.warning("sentence-transformers not installed. Using fast subword TF-IDF vectorizer fallback for chunking.")
 
 
 @dataclass
@@ -93,15 +88,35 @@ class FastSubwordVectorizer:
         return matrix
 
 
-class HierarchicalSemanticChunker:
+class BlockType:
+    HEADING = "heading"
+    TABLE = "table"
+    CODE = "code"
+    LIST = "list"
+    PARAGRAPH = "paragraph"
+    PAGE_MARKER = "page_marker"
+
+
+@dataclass
+class StructuralBlock:
+    block_type: str
+    text: str
+    level: int = 0
+    page_number: Optional[int] = None
+    breadcrumb: str = ""
+    section_title: str = ""
+
+
+class StructureAwareChunker:
     """
-    Implements hierarchical (parent-child) + semantic chunking with contextual enrichment.
+    Structure-Aware Document Chunker.
+    Parses and respects headings hierarchy, tables, code blocks, lists, page markers, and paragraphs.
     """
 
     def __init__(
         self,
         parent_chunk_size: int = 512,
-        child_chunk_size: int = 128,
+        child_chunk_size: int = 160,
         child_overlap: int = 20,
         semantic_threshold: float = 0.35,
         embed_model: Any = None,
@@ -114,309 +129,534 @@ class HierarchicalSemanticChunker:
         self._fallback_vectorizer = FastSubwordVectorizer()
 
     def set_embed_model(self, model: Any):
-        """Optionally attach a neural SentenceTransformer model once loaded."""
         self._embed_model = model
 
+    @staticmethod
+    def _token_count(text: str) -> int:
+        return int(len(text.split()) * 1.33)
+
     # ──────────────────────────────────────────────────────────────────────
-    # Public API
+    # Structural Syntax Detectors
     # ──────────────────────────────────────────────────────────────────────
 
-    def chunk_document(
-        self, doc_text: str, doc_id: str, session_id: str, doc_metadata: Dict[str, Any]
+    @staticmethod
+    def _is_page_marker(line: str) -> Optional[int]:
+        m = re.match(r"^---\s*\[(?:Page|Slide|Chapter|Sheet)\s+(\d+)\]\s*---", line.strip(), re.IGNORECASE)
+        return int(m.group(1)) if m else None
+
+    @staticmethod
+    def _is_code_fence(line: str) -> bool:
+        return line.strip().startswith("```")
+
+    @staticmethod
+    def _is_table_row(line: str) -> bool:
+        s = line.strip()
+        return (s.startswith("|") and s.endswith("|")) or s.count("|") >= 2
+
+    @staticmethod
+    def _is_list_item(line: str) -> bool:
+        return bool(re.match(r"^(\s*[-*•]|\s*\d+[\.\)])\s+\S+", line))
+
+    @staticmethod
+    def _is_heading(line: str) -> Optional[Tuple[int, str]]:
+        s = line.strip()
+        if not s:
+            return None
+
+        # 1. Markdown heading (# H1, ## H2, etc.)
+        m_md = re.match(r"^(#{1,6})\s+(.+)$", s)
+        if m_md:
+            level = len(m_md.group(1))
+            title = m_md.group(2).strip()
+            return level, title
+
+        # 2. Numbered outline headings (e.g. 1. Introduction, 1.1 Overview, 2.3.1 Architecture)
+        m_num = re.match(r"^(\d+(?:\.\d+)*)[\.\)\:\-]?\s+([A-Z][A-Za-z0-9_\s\-\(\)\/\,\&]{2,80})$", s)
+        if m_num:
+            dots = m_num.group(1).count(".")
+            level = min(6, dots + 2)
+            title = s
+            return level, title
+
+        # 3. Labeled chapter/unit/module/section (e.g. Unit 1: Introduction, Chapter 3 - Design)
+        m_lbl = re.match(r"^(?:Unit|Chapter|Section|Module|Part|Article|Clause)\s*(\d+|[A-Za-z]+)?\s*[:\-–]\s*(.+)$", s, re.IGNORECASE)
+        if m_lbl:
+            level = 2
+            return level, s
+
+        # 4. Short stand-alone uppercase line (e.g. "EXECUTIVE SUMMARY", "ABSTRACT")
+        if s.isupper() and 4 <= len(s) <= 50 and not s.endswith((".", ";", ":", ",")):
+            return 2, s
+
+        return None
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Step 1: Parse Document into Structural Blocks with Breadcrumbs
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _parse_blocks(self, text: str) -> List[StructuralBlock]:
+        lines = text.splitlines()
+        raw_blocks: List[StructuralBlock] = []
+
+        current_page: Optional[int] = None
+        heading_stack: List[Tuple[int, str]] = []
+
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.strip()
+
+            if not stripped:
+                i += 1
+                continue
+
+            # Page marker
+            page_num = self._is_page_marker(stripped)
+            if page_num is not None:
+                current_page = page_num
+                raw_blocks.append(StructuralBlock(
+                    block_type=BlockType.PAGE_MARKER,
+                    text=stripped,
+                    page_number=current_page,
+                ))
+                i += 1
+                continue
+
+            # Code fence
+            if self._is_code_fence(stripped):
+                code_lines = [line]
+                i += 1
+                while i < len(lines) and not self._is_code_fence(lines[i]):
+                    code_lines.append(lines[i])
+                    i += 1
+                if i < len(lines):
+                    code_lines.append(lines[i])
+                    i += 1
+                raw_blocks.append(StructuralBlock(
+                    block_type=BlockType.CODE,
+                    text="\n".join(code_lines),
+                    page_number=current_page,
+                ))
+                continue
+
+            # Table block
+            if self._is_table_row(stripped):
+                table_lines = [stripped]
+                i += 1
+                while i < len(lines) and self._is_table_row(lines[i]):
+                    table_lines.append(lines[i].strip())
+                    i += 1
+                raw_blocks.append(StructuralBlock(
+                    block_type=BlockType.TABLE,
+                    text="\n".join(table_lines),
+                    page_number=current_page,
+                ))
+                continue
+
+            # Heading block
+            h_info = self._is_heading(stripped)
+            if h_info:
+                level, h_title = h_info
+                while heading_stack and heading_stack[-1][0] >= level:
+                    heading_stack.pop()
+                heading_stack.append((level, h_title))
+                breadcrumb = " > ".join(h[1] for h in heading_stack)
+
+                raw_blocks.append(StructuralBlock(
+                    block_type=BlockType.HEADING,
+                    text=stripped,
+                    level=level,
+                    page_number=current_page,
+                    breadcrumb=breadcrumb,
+                    section_title=h_title,
+                ))
+                i += 1
+                continue
+
+            # List block
+            if self._is_list_item(stripped):
+                list_lines = [stripped]
+                i += 1
+                while i < len(lines):
+                    next_s = lines[i].strip()
+                    if not next_s:
+                        if i + 1 < len(lines) and self._is_list_item(lines[i + 1]):
+                            i += 1
+                            continue
+                        break
+                    if self._is_list_item(next_s) or lines[i].startswith(("  ", "\t")):
+                        list_lines.append(next_s)
+                        i += 1
+                    else:
+                        break
+                raw_blocks.append(StructuralBlock(
+                    block_type=BlockType.LIST,
+                    text="\n".join(list_lines),
+                    page_number=current_page,
+                ))
+                continue
+
+            # Paragraph block
+            para_lines = [stripped]
+            i += 1
+            while i < len(lines):
+                next_s = lines[i].strip()
+                if not next_s:
+                    break
+                if (
+                    self._is_page_marker(next_s)
+                    or self._is_code_fence(next_s)
+                    or self._is_table_row(next_s)
+                    or self._is_heading(next_s)
+                    or self._is_list_item(next_s)
+                ):
+                    break
+                para_lines.append(next_s)
+                i += 1
+            raw_blocks.append(StructuralBlock(
+                block_type=BlockType.PARAGRAPH,
+                text=" ".join(para_lines),
+                page_number=current_page,
+            ))
+
+        # Propagate active page and active breadcrumbs
+        active_p = None
+        active_b = ""
+        active_sec = "Introduction"
+
+        for b in raw_blocks:
+            if b.page_number is not None:
+                active_p = b.page_number
+            else:
+                b.page_number = active_p
+
+            if b.block_type == BlockType.HEADING:
+                active_b = b.breadcrumb
+                active_sec = b.section_title
+            else:
+                b.breadcrumb = active_b or active_sec
+                b.section_title = active_sec
+
+        return raw_blocks
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Step 2: Build Cohesive Parent Sections
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _build_parent_sections(self, blocks: List[StructuralBlock]) -> List[Dict[str, Any]]:
+        """Group structural blocks into logical parent sections (~512-800 tokens)."""
+        sections: List[Dict[str, Any]] = []
+        cur_blocks: List[StructuralBlock] = []
+        cur_tokens = 0
+        cur_header = "Introduction"
+        cur_page = None
+
+        def flush_section():
+            nonlocal cur_blocks, cur_tokens, cur_header, cur_page
+            if not cur_blocks:
+                return
+            content_blocks = [b for b in cur_blocks if b.block_type != BlockType.PAGE_MARKER]
+            if not content_blocks:
+                cur_blocks = []
+                cur_tokens = 0
+                return
+
+            p_text = "\n\n".join(b.text for b in content_blocks)
+            first_p = next((b.page_number for b in cur_blocks if b.page_number is not None), cur_page)
+            sec_header = content_blocks[0].section_title if content_blocks[0].section_title else cur_header
+            breadcrumb = content_blocks[0].breadcrumb if content_blocks[0].breadcrumb else sec_header
+
+            sections.append({
+                "parent_text": p_text,
+                "section_header": sec_header,
+                "breadcrumb": breadcrumb,
+                "page_num": first_p,
+                "blocks": content_blocks,
+            })
+            cur_blocks = []
+            cur_tokens = 0
+
+        for b in blocks:
+            b_tokens = self._token_count(b.text)
+
+            # Major section boundary: level 1 or 2 heading
+            if b.block_type == BlockType.HEADING and b.level <= 2:
+                if cur_blocks and cur_tokens >= 80:
+                    flush_section()
+                cur_header = b.section_title
+                cur_page = b.page_number
+                cur_blocks.append(b)
+                cur_tokens += b_tokens
+                continue
+
+            # Page boundary: each page or slide is a distinct structural unit
+            if b.block_type == BlockType.PAGE_MARKER:
+                if cur_blocks:
+                    flush_section()
+                cur_page = b.page_number
+                cur_blocks.append(b)
+                continue
+
+            # Token overflow: flush at block boundary
+            if cur_tokens + b_tokens > self.parent_chunk_size and cur_blocks:
+                flush_section()
+
+            cur_blocks.append(b)
+            cur_tokens += b_tokens
+
+        flush_section()
+        return sections
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Step 3: Structure-Aware Child Chunks Generation
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _split_table(self, table_text: str, max_tokens: int) -> List[str]:
+        """Split a large table by rows while repeating the table header on every chunk."""
+        lines = [l for l in table_text.strip().splitlines() if l.strip()]
+        if len(lines) <= 4:
+            return [table_text]
+
+        header_lines = []
+        data_rows = []
+        if len(lines) >= 2 and re.match(r"^\|?[\s\-:|]+\|?$", lines[1]):
+            header_lines = [lines[0], lines[1]]
+            data_rows = lines[2:]
+        else:
+            header_lines = [lines[0]]
+            data_rows = lines[1:]
+
+        header_prefix = "\n".join(header_lines)
+        chunks: List[str] = []
+        cur_chunk_rows = []
+        cur_t = self._token_count(header_prefix)
+
+        for row in data_rows:
+            rt = self._token_count(row)
+            if cur_t + rt > max_tokens and cur_chunk_rows:
+                chunk_str = header_prefix + "\n" + "\n".join(cur_chunk_rows)
+                chunks.append(chunk_str)
+                cur_chunk_rows = [row]
+                cur_t = self._token_count(header_prefix) + rt
+            else:
+                cur_chunk_rows.append(row)
+                cur_t += rt
+
+        if cur_chunk_rows:
+            chunk_str = header_prefix + "\n" + "\n".join(cur_chunk_rows)
+            chunks.append(chunk_str)
+
+        return chunks if chunks else [table_text]
+
+    def _split_paragraph(self, para_text: str, max_tokens: int) -> List[str]:
+        """Split long prose strictly at clean sentence boundaries."""
+        sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z0-9\"])", para_text)
+        if len(sentences) <= 1:
+            words = para_text.split()
+            parts = []
+            for k in range(0, len(words), max_tokens):
+                parts.append(" ".join(words[k: k + max_tokens]))
+            return parts
+
+        chunks: List[str] = []
+        cur_s = []
+        cur_t = 0
+
+        for s in sentences:
+            st = self._token_count(s)
+            if cur_t + st > max_tokens and cur_s:
+                chunks.append(" ".join(cur_s))
+                cur_s = [s]
+                cur_t = st
+            else:
+                cur_s.append(s)
+                cur_t += st
+
+        if cur_s:
+            chunks.append(" ".join(cur_s))
+        return chunks
+
+    def _generate_child_chunks(
+        self, parent_sec: Dict[str, Any], doc_metadata: Dict[str, Any], doc_id: str, session_id: str, parent_id: str, parent_idx: int, start_chunk_idx: int
     ) -> List[Chunk]:
-        """
-        Convert a full document string into a list of hierarchical child chunks linked to session_id.
-        """
-        parent_sections = self._split_into_parents(doc_text)
-        logger.info(
-            "Document %s (Session: %s) split into %d parent sections",
-            doc_id, session_id, len(parent_sections)
-        )
+        blocks: List[StructuralBlock] = parent_sec["blocks"]
+        parent_text: str = parent_sec["parent_text"]
+        doc_title = doc_metadata.get("title") or doc_metadata.get("source") or "Document"
 
-        all_chunks: List[Chunk] = []
-        global_chunk_idx = 0
+        child_chunks: List[Chunk] = []
+        curr_pieces: List[str] = []
+        curr_tokens = 0
+        curr_page = parent_sec["page_num"]
+        curr_type = "prose"
+        curr_breadcrumb = parent_sec["breadcrumb"]
+        curr_section = parent_sec["section_header"]
 
-        for parent_idx, (parent_text, section_header, page_num) in enumerate(parent_sections):
-            parent_id = str(uuid.uuid4())
-            child_texts = self._semantic_split(parent_text)
+        def flush_child(keep_trailing_heading: bool = True):
+            nonlocal curr_pieces, curr_tokens, curr_page, curr_type, curr_breadcrumb, curr_section, start_chunk_idx
+            if not curr_pieces:
+                return
 
-            # Fallback page extraction if not detected in section tuple
-            if page_num is None:
-                page_match = re.search(r"---\s*\[Page\s+(\d+)\]\s*---", parent_text)
-                page_num = int(page_match.group(1)) if page_match else None
+            saved_heading = None
+            if keep_trailing_heading and len(curr_pieces) > 1 and self._is_heading(curr_pieces[-1]):
+                saved_heading = curr_pieces.pop()
+                curr_tokens -= self._token_count(saved_heading)
 
-            for child_text in child_texts:
-                if not child_text.strip():
-                    continue
-
-                chunk_id = str(uuid.uuid4())
-                contextual_text = self._build_contextual_text(
-                    child_text, section_header, doc_metadata, page_num=page_num
-                )
+            child_text = "\n\n".join(curr_pieces).strip()
+            if child_text:
+                p_str = f" [Page: {curr_page}]" if curr_page is not None else ""
+                b_str = f" [Section: {curr_breadcrumb}]" if curr_breadcrumb else ""
+                t_str = f" ({curr_type})" if curr_type in ("table", "code", "list") else ""
+                contextual_text = f"[Document: {doc_title}]{p_str}{b_str}{t_str}\n{child_text}"
 
                 chunk = Chunk(
-                    id=chunk_id,
+                    id=str(uuid.uuid4()),
                     text=child_text,
                     contextual_text=contextual_text,
                     parent_id=parent_id,
                     parent_text=parent_text,
                     doc_id=doc_id,
                     session_id=session_id,
-                    chunk_index=global_chunk_idx,
+                    chunk_index=start_chunk_idx,
                     parent_index=parent_idx,
                     metadata={
                         **doc_metadata,
                         "doc_id": doc_id,
-                        "section": section_header,
-                        "parent_index": parent_idx,
                         "session_id": session_id,
-                        "page_number": page_num,
+                        "parent_index": parent_idx,
+                        "section": curr_section,
+                        "breadcrumb": curr_breadcrumb,
+                        "page_number": curr_page,
+                        "structural_type": curr_type,
+                        "word_count": len(child_text.split()),
                     },
                 )
-                all_chunks.append(chunk)
-                global_chunk_idx += 1
+                child_chunks.append(chunk)
+                start_chunk_idx += 1
+
+            if saved_heading:
+                curr_pieces = [saved_heading]
+                curr_tokens = self._token_count(saved_heading)
+            else:
+                curr_pieces = []
+                curr_tokens = 0
+
+        for b in blocks:
+            if b.page_number is not None:
+                curr_page = b.page_number
+            if b.breadcrumb:
+                curr_breadcrumb = b.breadcrumb
+            if b.section_title:
+                curr_section = b.section_title
+
+            # 1. Heading: attach to subsequent block (never leave trailing)
+            if b.block_type == BlockType.HEADING:
+                if curr_tokens > self.child_chunk_size and curr_pieces:
+                    flush_child()
+                curr_pieces.append(b.text)
+                curr_tokens += self._token_count(b.text)
+                continue
+
+            # 2. Table: atomic table chunking
+            if b.block_type == BlockType.TABLE:
+                t_count = self._token_count(b.text)
+                if t_count > int(self.child_chunk_size * 1.5):
+                    flush_child()
+                    curr_type = "table"
+                    sub_tables = self._split_table(b.text, self.child_chunk_size)
+                    for sub_t in sub_tables:
+                        curr_pieces = [sub_t]
+                        flush_child()
+                    curr_type = "prose"
+                    continue
+                else:
+                    if curr_tokens + t_count > self.child_chunk_size and curr_pieces:
+                        flush_child()
+                    curr_type = "table"
+                    curr_pieces.append(b.text)
+                    flush_child()
+                    curr_type = "prose"
+                    continue
+
+            # 3. Code: atomic code chunking
+            if b.block_type == BlockType.CODE:
+                c_count = self._token_count(b.text)
+                if curr_pieces and (curr_tokens + c_count > self.child_chunk_size):
+                    flush_child()
+                curr_type = "code"
+                curr_pieces.append(b.text)
+                flush_child()
+                curr_type = "prose"
+                continue
+
+            # 4. List: structured list grouping
+            if b.block_type == BlockType.LIST:
+                l_count = self._token_count(b.text)
+                if curr_tokens + l_count > self.child_chunk_size and curr_pieces:
+                    flush_child()
+                curr_type = "list"
+                curr_pieces.append(b.text)
+                curr_tokens += l_count
+                if curr_tokens >= self.child_chunk_size:
+                    flush_child()
+                    curr_type = "prose"
+                continue
+
+            # 5. Paragraph
+            p_count = self._token_count(b.text)
+            if p_count > int(self.child_chunk_size * 1.5):
+                if curr_pieces:
+                    flush_child()
+                sub_paras = self._split_paragraph(b.text, self.child_chunk_size)
+                for sp in sub_paras:
+                    curr_pieces = [sp]
+                    flush_child()
+                continue
+
+            if curr_tokens + p_count > self.child_chunk_size and curr_pieces:
+                flush_child()
+
+            curr_pieces.append(b.text)
+            curr_tokens += p_count
+
+        flush_child(keep_trailing_heading=False)
+        return child_chunks
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Public Entrypoint
+    # ──────────────────────────────────────────────────────────────────────
+
+    def chunk_document(
+        self, doc_text: str, doc_id: str, session_id: str, doc_metadata: Dict[str, Any]
+    ) -> List[Chunk]:
+        """
+        Structure-aware document chunking entrypoint.
+        """
+        blocks = self._parse_blocks(doc_text)
+        parent_sections = self._build_parent_sections(blocks)
+
+        all_chunks: List[Chunk] = []
+        global_chunk_idx = 0
+
+        for parent_idx, parent_sec in enumerate(parent_sections):
+            parent_id = str(uuid.uuid4())
+            children = self._generate_child_chunks(
+                parent_sec=parent_sec,
+                doc_metadata=doc_metadata,
+                doc_id=doc_id,
+                session_id=session_id,
+                parent_id=parent_id,
+                parent_idx=parent_idx,
+                start_chunk_idx=global_chunk_idx,
+            )
+            all_chunks.extend(children)
+            global_chunk_idx += len(children)
 
         logger.info(
-            "Created %d child chunks from %d parents for doc %s",
-            len(all_chunks),
-            len(parent_sections),
-            doc_id,
+            "StructureAwareChunker: Document %s split into %d structural parents and %d structure-aware child chunks",
+            doc_id, len(parent_sections), len(all_chunks)
         )
         return all_chunks
 
-    # ──────────────────────────────────────────────────────────────────────
-    # Step 1: Structural Parent Split
-    # ──────────────────────────────────────────────────────────────────────
 
-    @staticmethod
-    def _detect_section_header(page_text: str, page_num: Optional[int] = None) -> str:
-        """
-        Extract the title or section heading from a page or section across any document domain
-        (e.g., reports, research papers, legal agreements, technical manuals, specifications, presentations, forms).
-        """
-        lines = [line.strip() for line in page_text.splitlines() if line.strip()]
-        # Filter out boundary marker lines (Page, Slide, Chapter, Sheet, etc.)
-        lines = [l for l in lines if not re.match(r"^---\s*\[(?:Page|Slide|Chapter|Sheet)\s+\d+\]\s*---", l, re.IGNORECASE)]
-
-        if not lines:
-            return f"Page {page_num}" if page_num else "Section"
-
-        # 1. Structural headings & labeled document sections:
-        # e.g., Markdown (# Title), Numbered outlines (1. Overview, 1.0 Architecture, 2.1 Architecture),
-        # or standard document section keywords (Section, Chapter, Article, Clause, Overview, etc.)
-        structural_pattern = re.compile(
-            r"^(?:"
-            r"#{1,6}\s*(.+)"
-            r"|(?:\d+(?:\.\d+)*|[A-Z](?:\.\d+)*)[\.\)\:\-]?\s+([A-Z].*)"
-            r"|(?:Section|Chapter|Article|Item|Part|Clause|Exhibit|Appendix|Module|Unit|Problem|Question|Task|Challenge|Exercise|Scenario|Topic|Case|Finding|Requirement|Policy|Overview|Abstract|Methodology|Conclusion|Results|Discussion|Introduction|Background|Objective|Goal|Deliverable|Milestone|Standard|Rule|Definition)\s*(?:Statement\s*)?(?:[A-Z]|\d+)?\s*[:\- ]*\s*(.*)"
-            r")$",
-            re.IGNORECASE
-        )
-        for line in lines[:5]:
-            m = structural_pattern.match(line)
-            if m:
-                title_part = line.lstrip("#").strip()
-                if len(title_part) > 100:
-                    title_part = title_part[:97] + "..."
-                return title_part
-
-        # 2. Standalone typographic heading lines:
-        # Short (<= 85 chars), not a sentence fragment (no ending '.', ';', ':')
-        for line in lines[:2]:
-            clean_line = line.lstrip("#").strip()
-            if 3 <= len(clean_line) <= 85 and not clean_line.endswith((".", ";", ":", ",")):
-                return clean_line
-
-        return f"Page {page_num}" if page_num else "Main Content"
-
-    def _split_into_parents(self, text: str) -> List[tuple]:
-        """
-        Returns list of (parent_text, section_header, page_num) tuples.
-        Priority:
-          1. Page / Slide / Chapter markers (PDF, DOCX, PPTX pages)
-          2. Structural headings (Markdown '#', numbered outlines, labeled document sections)
-          3. Paragraph grouping fallback
-        """
-        # 1. Check for explicit Page markers
-        page_re = re.compile(r"^---\s*\[(?:Page|Slide|Chapter|Sheet)\s+(\d+)\]\s*---", re.MULTILINE | re.IGNORECASE)
-        page_matches = list(page_re.finditer(text))
-
-        if len(page_matches) >= 1:
-            sections = []
-            positions = [m.start() for m in page_matches] + [len(text)]
-            for i, m in enumerate(page_matches):
-                p_num = int(m.group(1))
-                page_text = text[m.start(): positions[i + 1]].strip()
-                sec_header = self._detect_section_header(page_text, p_num)
-                # If page is moderately sized (<= ~768 tokens), keep it as a unified parent chunk
-                if self._token_count(page_text) <= int(self.parent_chunk_size * 1.5):
-                    sections.append((page_text, sec_header, p_num))
-                else:
-                    sub_groups = self._group_paragraphs(page_text, sec_header, default_page=p_num)
-                    sections.extend(sub_groups)
-            return sections
-
-        # 2. Check for structural headings or labeled sections
-        heading_re = re.compile(
-            r"^(?:"
-            r"#{1,6}\s+.+"
-            r"|(?:\d+(?:\.\d+)*|[A-Z](?:\.\d+)*)[\.\)\:\-]?\s+[A-Z].+"
-            r"|(?:Section|Chapter|Article|Item|Part|Clause|Exhibit|Appendix|Module|Unit|Problem|Question|Task|Challenge|Exercise|Scenario|Topic|Case|Finding|Requirement|Policy|Overview|Abstract|Methodology|Conclusion|Results|Discussion|Introduction|Background|Objective|Goal|Deliverable|Milestone|Standard|Rule|Definition)\s*(?:Statement\s*)?(?:[A-Z]|\d+)?\s*[:\- ].+"
-            r")$",
-            re.MULTILINE | re.IGNORECASE
-        )
-        heading_matches = list(heading_re.finditer(text))
-
-        if len(heading_matches) >= 2:
-            sections = []
-            positions = [m.start() for m in heading_matches] + [len(text)]
-            for i, match in enumerate(heading_matches):
-                header = match.group(0).lstrip("#").strip()
-                if len(header) > 90:
-                    header = header[:87] + "..."
-                section_text = text[match.start(): positions[i + 1]].strip()
-                page_m = re.search(r"---\s*\[(?:Page|Slide|Chapter|Sheet)\s+(\d+)\]\s*---", section_text)
-                p_num = int(page_m.group(1)) if page_m else None
-                if self._token_count(section_text) > int(self.parent_chunk_size * 1.5):
-                    sub = self._group_paragraphs(section_text, header, default_page=p_num)
-                    sections.extend(sub)
-                else:
-                    sections.append((section_text, header, p_num))
-            return sections
-
-        # 3. Fallback to paragraph grouping
-        return self._group_paragraphs(text, header="Main Content", default_page=None)
-
-    def _group_paragraphs(
-        self, text: str, header: str, default_page: Optional[int] = None
-    ) -> List[tuple]:
-        paragraphs = re.split(r"\n{2,}", text)
-        groups: List[tuple] = []
-        current_paras: List[str] = []
-        current_tokens = 0
-        part_idx = 1
-
-        for para in paragraphs:
-            para = para.strip()
-            if not para:
-                continue
-            pt = self._token_count(para)
-            if current_tokens + pt > self.parent_chunk_size and current_paras:
-                group_text = "\n\n".join(current_paras)
-                p_match = re.search(r"---\s*\[Page\s+(\d+)\]\s*---", group_text)
-                p_num = int(p_match.group(1)) if p_match else default_page
-                sub_header = f"{header} (Part {part_idx})" if part_idx > 1 else header
-                groups.append((group_text, sub_header, p_num))
-                part_idx += 1
-                current_paras = [para]
-                current_tokens = pt
-            else:
-                current_paras.append(para)
-                current_tokens += pt
-
-        if current_paras:
-            group_text = "\n\n".join(current_paras)
-            p_match = re.search(r"---\s*\[Page\s+(\d+)\]\s*---", group_text)
-            p_num = int(p_match.group(1)) if p_match else default_page
-            sub_header = f"{header} (Part {part_idx})" if part_idx > 1 else header
-            groups.append((group_text, sub_header, p_num))
-
-        return groups if groups else [(text, header, default_page)]
-
-    # ──────────────────────────────────────────────────────────────────────
-    # Step 2: Semantic Child Split
-    # ──────────────────────────────────────────────────────────────────────
-
-    def _semantic_split(self, text: str) -> List[str]:
-        """
-        Split parent text into semantically cohesive child chunks by detecting
-        topic boundaries via cosine distance between adjacent sentence embeddings.
-        """
-        # If parent text is already compact (<= 1.5x child chunk size), keep it unified
-        if self._token_count(text) <= int(self.child_chunk_size * 1.5):
-            return [text.strip()]
-
-        sentences = self._split_sentences(text)
-
-        if len(sentences) <= 3:
-            return self._split_by_tokens(text)
-
-        # Fast subword vectorizer for instantaneous and reliable topic-boundary detection
-        embeddings = self._fallback_vectorizer.encode(sentences)
-
-        # Find topic-boundary indices
-        split_positions = [0]
-        for i in range(1, len(embeddings)):
-            sim = self._cosine_sim(embeddings[i - 1], embeddings[i])
-            distance = 1.0 - sim
-            if distance > self.semantic_threshold:
-                split_positions.append(i)
-        split_positions.append(len(sentences))
-
-        # Build child chunks from sentence groups
-        children: List[str] = []
-        for j in range(len(split_positions) - 1):
-            group = sentences[split_positions[j]: split_positions[j + 1]]
-            group_text = " ".join(group)
-            if self._token_count(group_text) > self.child_chunk_size:
-                children.extend(self._split_by_tokens(group_text))
-            else:
-                children.append(group_text)
-
-        return [c for c in children if c.strip()]
-
-    # ──────────────────────────────────────────────────────────────────────
-    # Step 3: Contextual Prefix
-    # ──────────────────────────────────────────────────────────────────────
-
-    def _build_contextual_text(
-        self, child_text: str, section_header: str, doc_metadata: Dict, page_num: Optional[int] = None
-    ) -> str:
-        doc_title = doc_metadata.get("title") or doc_metadata.get("source") or "Document"
-        page_str = f" [Page: {page_num}]" if page_num is not None else ""
-        context = (
-            f"[Document: {doc_title}]{page_str} "
-            f"[Section: {section_header}] "
-            f"{child_text}"
-        )
-        return context
-
-    # ──────────────────────────────────────────────────────────────────────
-    # Helpers
-    # ──────────────────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _split_sentences(text: str) -> List[str]:
-        sentence_endings = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"])")
-        sentences = sentence_endings.split(text)
-        result = []
-        for s in sentences:
-            s = s.strip()
-            if s:
-                result.append(s)
-        return result
-
-    def _split_by_tokens(self, text: str) -> List[str]:
-        words = text.split()
-        chunks = []
-        start = 0
-        size = self.child_chunk_size
-        overlap = self.child_overlap
-
-        while start < len(words):
-            end = min(start + size, len(words))
-            chunks.append(" ".join(words[start:end]))
-            if end == len(words):
-                break
-            start = end - overlap
-
-        return chunks
-
-    @staticmethod
-    def _token_count(text: str) -> int:
-        return int(len(text.split()) * 1.33)
-
-    @staticmethod
-    def _cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
-        denom = (np.linalg.norm(a) * np.linalg.norm(b)) + 1e-9
-        return float(np.dot(a, b) / denom)
+# Backward-compatible alias
+HierarchicalSemanticChunker = StructureAwareChunker

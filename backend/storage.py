@@ -160,4 +160,5 @@ def get_storage_backend(settings) -> StorageBackend:
             secret_key=settings.s3_secret_key,
             region=settings.s3_region,
         )
-    return LocalStorageBackend(base_dir=settings.upload_dir)
+    upload_dir = getattr(settings, "resolved_upload_dir", settings.upload_dir)
+    return LocalStorageBackend(base_dir=upload_dir)

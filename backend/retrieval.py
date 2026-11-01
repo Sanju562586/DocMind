@@ -132,7 +132,9 @@ class HybridRetriever:
         candidates_k: int = 50,
         max_cached_sessions: int = 30,
         load_neural: bool = True,
+        store: Optional[Any] = None,
     ):
+        self.store = store
         self.index_dir = index_dir
         self.top_k = top_k
         self.candidates_k = candidates_k
@@ -179,6 +181,10 @@ class HybridRetriever:
             bi = SentenceTransformer(_BI_ENCODER_MODEL)
             self._bi_encoder = bi
             logger.info("Bi-encoder loaded successfully [OK]")
+            try:
+                self._upgrade_indexes_to_neural()
+            except Exception as up_exc:
+                logger.warning('Index neural upgrade notice: %s', up_exc)
             
             for cb in self._on_model_ready_callbacks:
                 try:
@@ -192,6 +198,43 @@ class HybridRetriever:
             logger.info("Cross-encoder loaded successfully [OK]")
         except Exception as exc:
             logger.warning("Neural transformer background load notice: %s. Continuing with fast subword embeddings.", exc)
+
+
+    def _upgrade_indexes_to_neural(self):
+        """Re-encode any sessions with 1024-dim fallback embeddings to 384-dim neural embeddings."""
+        if self._bi_encoder is None:
+            return
+        logger.info("Checking for indexes requiring neural upgrade...")
+        for sid in list(self._session_embeddings.keys()):
+            embs = self._session_embeddings[sid]
+            if embs is not None and embs.ndim == 2 and embs.shape[1] != 384:
+                chunks = self._session_chunks.get(sid, [])
+                if chunks:
+                    logger.info("Upgrading in-memory session %s from %d-dim to 384-dim neural embeddings", sid, embs.shape[1])
+                    new_embs = self._bi_encoder.encode([c.contextual_text for c in chunks], normalize_embeddings=True).astype(np.float32)
+                    self._session_embeddings[sid] = new_embs
+                    self._save_session_index(sid, new_embs, chunks)
+
+        if os.path.exists(self.index_dir):
+            for fname in os.listdir(self.index_dir):
+                if fname.startswith("session_") and fname.endswith(".npz"):
+                    sid = fname[len("session_"):-len(".npz")]
+                    if sid in self._session_embeddings and self._session_embeddings[sid].shape[1] == 384:
+                        continue
+                    try:
+                        path = os.path.join(self.index_dir, fname)
+                        with np.load(path, allow_pickle=True) as data:
+                            embs = np.array(data["embeddings"])
+                        if embs.ndim == 2 and embs.shape[1] != 384:
+                            logger.info("Upgrading disk session %s (%s) from %d-dim to 384-dim neural embeddings", sid, fname, embs.shape[1])
+                            self._load_session_index(sid)
+                            chunks = self._session_chunks.get(sid, [])
+                            if chunks:
+                                new_embs = self._bi_encoder.encode([c.contextual_text for c in chunks], normalize_embeddings=True).astype(np.float32)
+                                self._session_embeddings[sid] = new_embs
+                                self._save_session_index(sid, new_embs, chunks)
+                    except Exception as exc:
+                        logger.debug("Neural upgrade notice for %s: %s", fname, exc)
 
     def _evict_lru_if_needed(self):
         """Evict oldest cached session indexes if RAM capacity is exceeded."""
@@ -285,9 +328,22 @@ class HybridRetriever:
             return self._session_chunks[session_id]
         try:
             self._load_session_index(session_id)
-            return self._session_chunks.get(session_id, [])
+            if session_id in self._session_chunks:
+                return self._session_chunks[session_id]
         except Exception:
-            return []
+            pass
+
+        if self.store is not None:
+            try:
+                chunks = self.store.get_chunks_for_session(session_id)
+                if chunks:
+                    logger.info("Rebuilding session %s index from database chunks (%d chunks)", session_id, len(chunks))
+                    self.index_session_chunks(session_id, chunks, replace=True)
+                    return chunks
+            except Exception as exc:
+                logger.warning("Failed to recover session chunks from store: %s", exc)
+
+        return []
 
     # ──────────────────────────────────────────────────────────────────────
     # Session Document Retrieval
@@ -414,10 +470,30 @@ class HybridRetriever:
             else:
                 bm25_model = SimpleBM25(tokenized_all)
 
-            if all_embeddings_list:
-                doc_embs = np.vstack(all_embeddings_list).astype(np.float32)
+            # Ensure all embedding arrays have identical dimensions matching query
+            target_dim = 384 if self._bi_encoder is not None else 1024
+            normalized_embs_list = []
+            for embs_arr in all_embeddings_list:
+                if embs_arr is not None and embs_arr.ndim == 2:
+                    if embs_arr.shape[1] != target_dim:
+                        # Re-encode subset chunks to target_dim
+                        pass
+                    normalized_embs_list.append(embs_arr)
+
+            # Check if all arrays in normalized_embs_list have matching shape[1]
+            valid_embs = []
+            if normalized_embs_list:
+                common_dim = normalized_embs_list[0].shape[1]
+                for ea in normalized_embs_list:
+                    if ea.shape[1] == common_dim:
+                        valid_embs.append(ea)
+
+            if valid_embs and sum(len(e) for e in valid_embs) == n:
+                doc_embs = np.vstack(valid_embs).astype(np.float32)
+            elif self._bi_encoder is not None:
+                doc_embs = self._bi_encoder.encode([c.contextual_text for c in chunks], normalize_embeddings=True).astype(np.float32)
             else:
-                doc_embs = np.zeros((n, 384), dtype=np.float32)
+                doc_embs = self._fallback_vectorizer.encode([c.contextual_text for c in chunks]).astype(np.float32)
 
             t0 = time.perf_counter()
             tokenized_query = _tokenize_text(query)
@@ -467,10 +543,16 @@ class HybridRetriever:
                 query_emb = self._fallback_vectorizer.encode([query])[0].astype(np.float32)
 
             doc_embs = self._session_embeddings[session_id]
-            if doc_embs.shape[1] == query_emb.shape[0]:
-                dense_scores = doc_embs @ query_emb
-            else:
-                dense_scores = np.zeros(n, dtype=np.float32)
+            if doc_embs.shape[1] != query_emb.shape[0]:
+                logger.info("Session %s embedding dimension mismatch (%d vs %d); re-encoding chunks", session_id, doc_embs.shape[1], query_emb.shape[0])
+                if self._bi_encoder is not None:
+                    doc_embs = self._bi_encoder.encode([c.contextual_text for c in chunks], normalize_embeddings=True).astype(np.float32)
+                else:
+                    doc_embs = self._fallback_vectorizer.encode([c.contextual_text for c in chunks]).astype(np.float32)
+                self._session_embeddings[session_id] = doc_embs
+                self._save_session_index(session_id, doc_embs, chunks)
+
+            dense_scores = doc_embs @ query_emb
             dense_ranks = np.argsort(dense_scores)[::-1]
             dense_latency = (time.perf_counter() - t1) * 1000.0
 
@@ -552,6 +634,23 @@ class HybridRetriever:
             for c in chunks:
                 if len(results) >= top_k:
                     break
+                if c.parent_id not in seen_parent_ids:
+                    seen_parent_ids.add(c.parent_id)
+                    results.append({
+                        "chunk_id": c.id,
+                        "doc_id": c.doc_id,
+                        "child_text": c.text,
+                        "parent_text": c.parent_text,
+                        "rerank_score": 0.0,
+                        "bm25_score": 0.0,
+                        "dense_score": 0.0,
+                        "rrf_score": 0.0,
+                        "metadata": c.metadata,
+                    })
+
+        # Safety fallback: ensure document context is never empty when chunks exist in the session
+        if len(results) == 0 and len(chunks) > 0:
+            for c in chunks[:top_k]:
                 if c.parent_id not in seen_parent_ids:
                     seen_parent_ids.add(c.parent_id)
                     results.append({
@@ -687,6 +786,12 @@ class HybridRetriever:
                 # Reconstruct BM25 model
                 tokenized = [_tokenize_text(c.contextual_text) for c in chunks]
                 bm25 = BM25Okapi(tokenized) if _HAVE_BM25 else SimpleBM25(tokenized)
+
+                # Check if dimensions match active neural model
+                if self._bi_encoder is not None and embeddings.ndim == 2 and embeddings.shape[1] != 384:
+                    logger.info("Session %s has %d-dim embeddings; re-encoding to 384-dim neural", session_id, embeddings.shape[1])
+                    embeddings = self._bi_encoder.encode([c.contextual_text for c in chunks], normalize_embeddings=True).astype(np.float32)
+                    self._save_session_index(session_id, embeddings, chunks)
 
                 self._session_bm25[session_id] = bm25
                 self._session_embeddings[session_id] = embeddings
