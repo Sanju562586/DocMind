@@ -40,7 +40,7 @@ Whether analyzing complex legal contracts, financial spreadsheets, research pape
 | 🛡️ **Grounding** | **Strict Anti-Hallucination Protocol** | Explicit document citations and transparent disclosure notices when queries fall outside the document scope. |
 | ⚡ **Resilience** | **Cascading Multi-LLM Router** | Automatic fallback chain: **Google Gemini $\rightarrow$ Groq $\rightarrow$ OpenRouter** on rate limits (429), quota limits, or server errors. |
 | 🔐 **Authentication** | **Google & GitHub OAuth 2.0** | One-click OAuth login, cryptographic JWT sessions, user isolation, and guest mode. |
-| 🐘 **Persistence** | **PostgreSQL & SQLite Storage** | Dual-engine persistence supporting PostgreSQL with connection pooling (`DATABASE_URL`) and automatic SQLite WAL fallback. |
+| 🐘 **Persistence** | **Hybrid Local-First Storage** | Client-side local storage engine for instant recovery, isolated local SQLite & vector indexes for document chunks, and resilient PostgreSQL pooling for cloud metadata. |
 | 🔗 **Collaboration** | **Public Shareable Chat Links** | Instant public read-only transcript links (`/share/[shareToken]`) with fine-grained access revocation and credential sanitization. |
 | 🎨 **User Experience** | **Modern Glassmorphic UI** | Next.js 16 + React 19 interface with real-time SSE streaming, particle background, 3D tilt effects, keyboard hotkeys, and dark theme. |
 | 💾 **Data & Export** | **Multi-Format Export & PDF** | Export full conversation transcripts to **PDF, Markdown, JSON, or Plain Text**. |
@@ -49,66 +49,90 @@ Whether analyzing complex legal contracts, financial spreadsheets, research pape
 
 ## 🏗️ System Architecture
 
+DocMind utilizes a resilient **hybrid client-server architecture** designed to guarantee zero data loss, low retrieval latency, and immunity against cloud container spin-downs or free-tier database resets:
+
 ```mermaid
 flowchart TD
-    subgraph Client ["🖥️ Frontend (Next.js 16 + React 19)"]
-        UI[Glassmorphic UI / Chat Interface]
-        SSE_Handler[Real-Time SSE Stream Consumer]
-        Storage[BYOK Key Storage & Session Cache]
+    subgraph Client ["🖥️ Client Tier (Next.js 16 + React 19)"]
+        UI["Glassmorphic UI / Chat Interface"]
+        SSE_Handler["Real-Time SSE Stream Consumer"]
+        Client_Storage["Local System Storage Engine (localStorage: Chats, Messages & Chunks)"]
     end
 
-    subgraph API_Gateway ["🚀 FastAPI Backend Gateway"]
-        Auth[Header Key Override / CORS / Rate Limiter]
-        Endpoints[REST Endpoints & SSE Streaming Engine]
+    subgraph API_Gateway ["🚀 Backend Gateway (FastAPI)"]
+        Auth["JWT Auth / CORS / Sliding Rate Limiter"]
+        Endpoints["REST Endpoints & SSE Streaming Engine"]
+        Task_Queue["Async Worker Queue & Background Tasks"]
     end
 
-    subgraph Ingestion ["📥 Ingestion & Hierarchical Chunking"]
-        Parser[Multi-Format Parser: PDF, DOCX, XLSX, CSV, HTML, TXT]
-        Semantic_Split[Semantic Topic Boundary Detector]
-        ParentChild[Parent-Child Chunk Generator + Context Prefix]
+    subgraph Ingestion ["📥 Ingestion & Chunking"]
+        Parser["Multi-Format Parser (PDF, DOCX, XLSX, CSV, HTML, URL)"]
+        Chunker["Hierarchical Structure-Aware Chunker (Parent ~512t, Child ~128t)"]
     end
 
-    subgraph Retrieval_Engine ["🔍 4-Stage Hybrid Retrieval Engine"]
-        BM25_Index[BM25Okapi Keyword Index]
-        Dense_Index[Dense Bi-Encoder: all-MiniLM-L6-v2]
-        RRF[Reciprocal Rank Fusion RRF]
-        Cross_Encoder[Cross-Encoder Reranker: ms-marco-MiniLM-L-6-v2]
-        Parent_Expander[Parent Context Expansion]
+    subgraph Local_Storage ["💾 Local Storage Engine (Chunks & Vectors)"]
+        Local_DB[("Local SQLite Database (document_chunks table)")]
+        Disk_Indexes[("Local Compressed .npz Vector Embeddings")]
+        Upload_Files[("Local / S3 Uploaded Document Files")]
     end
 
-    subgraph Memory_Engine ["🧠 Cross-Session Global Memory"]
-        Memory_DB[(Global Memory Vector Store)]
-        Memory_Retriever[Neural Cosine Memory Recall]
+    subgraph Retrieval_Engine ["🔍 5-Stage Hybrid Retrieval Pipeline"]
+        BM25_Index["BM25Okapi Keyword Index"]
+        Dense_Index["Bi-Encoder: all-MiniLM-L6-v2 (384-dim)"]
+        RRF["Reciprocal Rank Fusion (RRF)"]
+        Cross_Encoder["Cross-Encoder Reranker: ms-marco-MiniLM-L-6-v2"]
+        Parent_Expander["Parent Context Expansion (~512t Grounding)"]
+    end
+
+    subgraph Memory_Engine ["🧠 Cross-Session Memory"]
+        Memory_Store[("Global Memory Store")]
+        Memory_Retriever["Neural Cosine Memory Recall"]
     end
 
     subgraph LLM_Router ["⚡ Multi-LLM Router & Failover Engine"]
-        Gemini[Google Gemini 2.0 / 3.7 Flash]
-        Groq[Groq LLaMA 3.3 70B Versatile]
-        OpenRouter[OpenRouter Claude 3.5 Haiku Fallback]
+        Gemini["Google Gemini (Primary)"]
+        Groq["Groq LLaMA 3.3 (Fast Failover)"]
+        OpenRouter["OpenRouter Claude / LLaMA (Tertiary)"]
     end
 
-    subgraph Persistence ["💾 Persistence Layer"]
-        DB[(PostgreSQL / SQLite WAL: Sessions, History, Shares)]
-        Disk_Indexes[(Serialized Embeddings & Indexes)]
-        Uploads[(File Storage / Uploads)]
+    subgraph Cloud_DB ["🐘 Cloud Persistence (Metadata)"]
+        Remote_PG[("PostgreSQL Pool: Sessions, Users, Messages, Shares")]
     end
 
-    UI -->|Upload Document| Endpoints
-    Endpoints --> Parser --> Semantic_Split --> ParentChild
-    ParentChild --> BM25_Index & Dense_Index
-    ParentChild --> Disk_Indexes
+    %% Client Interactions
+    UI <--> Client_Storage
+    UI -->|Upload Document / URL| Endpoints
+    UI -->|Chat Query| Endpoints
+    Endpoints -->|Stream Tokens SSE| SSE_Handler --> UI
 
-    UI -->|User Prompt| Endpoints
+    %% Ingestion Flow
+    Endpoints --> Task_Queue --> Parser --> Chunker
+    Chunker -->|Store Chunks Locally Only| Local_DB
+    Chunker -->|Build Vector Embeddings| Dense_Index & BM25_Index
+    Dense_Index --> Disk_Indexes
+
+    %% Retrieval Flow
     Endpoints --> BM25_Index & Dense_Index
     BM25_Index & Dense_Index --> RRF --> Cross_Encoder --> Parent_Expander
-    Endpoints --> Memory_Retriever --> Memory_DB
+    Endpoints --> Memory_Retriever --> Memory_Store
 
+    %% Generation Flow
     Parent_Expander & Memory_Retriever --> LLM_Router
-    LLM_Router -->|Stream Tokens SSE| SSE_Handler --> UI
+    LLM_Router -->|Fallback on 429/503| Groq & OpenRouter
 
-    Endpoints --> DB
-    Endpoints --> Uploads
+    %% Persistence Flow
+    Endpoints --> Remote_PG
+    Endpoints <-->|Rehydrate / Read Chunks| Local_DB
+    Endpoints --> Upload_Files
 ```
+
+### Architectural Highlights
+
+- **Client-Side Primary Persistence**: Conversations, messages, and document chunks are cached directly in the browser's local system storage (`localStorageStore`). If a remote container sleeps or a free-tier database pauses, chats remain immediately accessible and automatically re-hydrate the backend database on demand.
+- **Isolated Local Chunk & Vector Storage**: Document chunks and vector embeddings are stored **strictly in local storage only** (local SQLite `summarizer.db` + compressed `.npz` index files on disk). Remote PostgreSQL is reserved for lightweight metadata (sessions, users, messages, shares), preventing connection pool exhaustion and table size bloat on free cloud database tiers.
+- **5-Stage Hybrid RAG**: Sparse BM25 keyword matching runs in parallel with 384-dimensional dense transformer embeddings (`all-MiniLM-L6-v2`). Results are fused using Reciprocal Rank Fusion (RRF) and scored with cross-attention joint reranking (`ms-marco-MiniLM-L-6-v2`), expanding to full parent context for factual grounding.
+- **Cascading Zero-Downtime Multi-LLM Routing**: Automatically falls back from Google Gemini to Groq and OpenRouter upon rate limits (429), quota exhaustion, or server disruptions (503).
+- **Global Cross-Session Memory**: Encodes key dialogue insights across distinct chat threads, enabling the model to recall relevant historical context in subsequent conversations.
 
 ---
 
@@ -144,76 +168,6 @@ DocMind uses a refined 5-stage retrieval-augmented generation architecture:
        ▼
  6. Parent Context Expansion & Global Memory Injection
     └── Full parent section + recalled cross-session memories fed into LLM
-```
-
----
-
-## 📂 Repository Structure
-
-```
-DocumentSummarizer/
-├── backend/                        # FastAPI Backend Application
-│   ├── auth.py                     # HMAC-SHA256 JWT auth & identity extraction
-│   ├── chunker.py                  # Hierarchical semantic chunker & subword vectorizer
-│   ├── config.py                   # Pydantic environment configuration
-│   ├── document_parser.py          # Unified parser for PDF, DOCX, XLSX, CSV, HTML, TXT
-│   ├── llm_router.py               # Cascading LLM router (Gemini → Groq → OpenRouter)
-│   ├── main.py                     # FastAPI application routes, SSE streaming, telemetry
-│   ├── metrics.py                  # Prometheus metrics collector (/metrics endpoint)
-│   ├── models.py                   # Pydantic schemas for requests and responses
-│   ├── rate_limiter.py             # Upstash Redis & sliding-window rate limiter
-│   ├── requirements.txt            # Python dependencies (PyTorch, transformers, FastAPI)
-│   ├── retrieval.py                # BM25 + Dense + Cross-Encoder hybrid retriever
-│   ├── session_store.py            # SQLite WAL store for sessions, messages & memory
-│   ├── storage.py                  # Pluggable storage abstraction (Local & S3/MinIO)
-│   ├── task_queue.py               # Bounded asynchronous task queue & worker pool
-│   ├── Dockerfile                  # Production container definition for backend
-│   └── .env.example                # Backend environment variable template
-│
-├── frontend/                       # Next.js 16 App Router Frontend
-│   ├── public/                     # Static assets, icons, manifest
-│   ├── src/
-│   │   ├── app/
-│   │   │   ├── api/
-│   │   │   │   ├── auth/           # NextAuth session & JWT token issuing
-│   │   │   │   ├── backend/        # Secure reverse proxy to FastAPI backend
-│   │   │   │   └── keys/           # Server-side encrypted API key store
-│   │   │   ├── globals.css         # Global design system, glassmorphism & typography
-│   │   │   ├── layout.tsx          # Root layout & font configurations
-│   │   │   ├── page.tsx            # Main application page & state orchestrator
-│   │   │   └── error.tsx           # Graceful client error boundary
-│   │   ├── components/
-│   │   │   ├── AuthModal.tsx       # Authentication & user profile modal
-│   │   │   ├── CompareModal.tsx    # Multi-document comparison matrix view
-│   │   │   ├── DocumentViewerModal.tsx # In-browser document preview
-│   │   │   ├── EmptyState.tsx      # Interactive welcome view with sample prompts
-│   │   │   ├── GlobalMemoryModal.tsx # Cross-session memory manager & search
-│   │   │   ├── InteractiveBackground.tsx # GPU-accelerated ambient particle canvas
-│   │   │   ├── KeyboardShortcutsModal.tsx # Hotkeys command guide
-│   │   │   ├── MessageBubble.tsx   # Markdown chat bubbles, citations & copy actions
-│   │   │   ├── Modals.tsx          # Document upload modal & API key settings modal
-│   │   │   ├── NeuralWaveform.tsx  # Dynamic audio/AI waveform visualization
-│   │   │   ├── PipelineModal.tsx   # Visual interactive RAG pipeline inspector
-│   │   │   ├── QuizModal.tsx       # Interactive AI quiz & flashcard generator
-│   │   │   ├── Sidebar.tsx         # Conversation history, session actions & stats
-│   │   │   └── TiltCard.tsx        # 3D interactive physics hover card
-│   │   └── lib/
-│   │       ├── api.ts              # Typed fetch client with SSE streaming support
-│   │       ├── auth-token.ts       # Cryptographic JWT signing & verification
-│   │       ├── auth.tsx            # React authentication context provider
-│   │       ├── markdown.ts         # Markdown styling & sanitization
-│   │       └── types.ts            # TypeScript interfaces & data contracts
-│   ├── package.json                # Frontend dependencies & Next.js scripts
-│   └── Dockerfile                  # Multi-stage production container for frontend
-│
-├── data/                           # Runtime storage (git-ignored)
-│   ├── indexes/                    # Persisted vector embeddings & BM25 caches
-│   ├── uploads/                    # Securely stored uploaded files
-│   └── summarizer.db               # SQLite database with WAL journal
-│
-├── docker-compose.yml              # Multi-service container orchestration
-├── render.yaml                     # Render cloud infrastructure blueprint
-└── README.md                       # Project documentation
 ```
 
 ---
