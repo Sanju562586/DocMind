@@ -70,6 +70,14 @@ import {
 } from "@/lib/api";
 import { exportSessionToPdf } from "@/lib/pdfExporter";
 import { ApiKeys, Document, Message, Session, Source, MemoryItem } from "@/lib/types";
+import {
+  getLocalSessions,
+  getLocalMessages,
+  appendLocalMessage,
+  downloadChatsBackupFile,
+  importChatsBackupJson,
+  getLocalStats,
+} from "@/lib/localStorageStore";
 import { AuthModal } from "@/components/AuthModal";
 import { useAuth } from "@/lib/auth";
 
@@ -105,7 +113,9 @@ type ModalType = "none" | "upload" | "settings" | "memory" | "pipeline" | "short
 export default function HomePage() {
   const { user, authNotification, clearAuthNotification } = useAuth();
   const [apiKeys, setApiKeys] = useState<ApiKeys>({ gemini: "", groq: "", openrouter: "" });
-  const [sessions, setSessions] = useState<Session[]>([]);
+  const [sessions, setSessions] = useState<Session[]>(() =>
+    typeof window !== "undefined" ? getLocalSessions() : []
+  );
   const [activeSession, setActiveSession] = useState<Session | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [isExportingPdf, setIsExportingPdf] = useState(false);
@@ -420,8 +430,22 @@ export default function HomePage() {
 
   // ── Sync user-isolated sessions & API keys when identity changes ──────────
   useEffect(() => {
-    setActiveSession(null);
-    setMessages([]);
+    if (typeof window !== "undefined") {
+      const local = getLocalSessions();
+      if (local.length > 0) {
+        setSessions(local);
+        const userKey = user?.id ? `docmind_last_session_${user.id}` : "docmind_last_session_guest";
+        const lastId = localStorage.getItem(userKey);
+        const target = (lastId ? local.find((s) => s.id === lastId) : null) || local[0];
+        if (target) {
+          setActiveSession(target);
+          const cachedMsgs = getLocalMessages(target.id);
+          if (cachedMsgs.length > 0) {
+            setMessages(cachedMsgs);
+          }
+        }
+      }
+    }
     loadSessionsList(true);
     if (user?.id) {
       fetchKeyStatus()
@@ -478,14 +502,21 @@ export default function HomePage() {
             }
           }
           // Auto-select most recent active conversation if none chosen
-          if (sessList.length > 0) {
+          if (sessList.length > 0 && !activeSession) {
             handleSelectSession(sessList[0]);
           }
         } catch {}
       }
     } catch (err) {
-      console.warn("Backend server not reachable during session loading:", err);
+      console.warn("Backend server not reachable during session loading; falling back to local storage:", err);
       setBackendStatus("unreachable");
+      const local = getLocalSessions();
+      if (local.length > 0) {
+        setSessions(local);
+        if (!activeSession) {
+          handleSelectSession(local[0]);
+        }
+      }
     }
   };
 
@@ -533,8 +564,12 @@ export default function HomePage() {
         localStorage.setItem(userKey, session.id);
       } catch {}
     }
-    setIsLoadingMessages(true);
-    setMessages([]);
+    // Instant local retrieval from local system storage
+    const cached = getLocalMessages(session.id);
+    if (cached.length > 0) {
+      setMessages(cached);
+    }
+    setIsLoadingMessages(cached.length === 0);
     setError("");
     if (typeof window !== "undefined" && window.innerWidth < 768) {
       setIsSidebarOpen(false);
@@ -546,7 +581,9 @@ export default function HomePage() {
       const msgs = await getMessages(session.id);
       setMessages(msgs);
     } catch {
-      setError("Failed to load messages for this conversation");
+      if (cached.length === 0) {
+        setError("Failed to load messages for this conversation");
+      }
     } finally {
       setIsLoadingMessages(false);
     }
@@ -756,6 +793,7 @@ export default function HomePage() {
       created_at: new Date().toISOString(),
     };
     setMessages((prev) => [...prev, userMsg]);
+    appendLocalMessage(session.id, userMsg);
 
     setIsStreaming(true);
     setStreamingContent("");
@@ -806,6 +844,7 @@ export default function HomePage() {
                 memory_recalled: capturedMemories,
               };
               setMessages((prev) => [...prev, assistantMsg]);
+              appendLocalMessage(session.id, assistantMsg);
             }
             listSessions().then(setSessions).catch((err) => console.warn("Failed to refresh sessions list:", err));
           },
@@ -879,6 +918,7 @@ export default function HomePage() {
                 created_at: new Date().toISOString(),
               };
               setMessages((prev) => [...prev, summaryMsg]);
+              appendLocalMessage(activeSession.id, summaryMsg);
             }
             listSessions().then(setSessions).catch((err) => console.warn("Failed to refresh sessions list:", err));
           },
@@ -1004,6 +1044,7 @@ export default function HomePage() {
                 memory_recalled: capturedMemories,
               };
               setMessages((prev) => [...prev, assistantMsg]);
+              appendLocalMessage(activeSession.id, assistantMsg);
             }
           },
           onError: (errMsg) => {
@@ -1045,6 +1086,7 @@ export default function HomePage() {
         created_at: new Date().toISOString(),
       };
       setMessages((prev) => [...prev, sysMsg]);
+      appendLocalMessage(activeSession.id, sysMsg);
     }
     showToast(`Attached ${doc.filename} successfully`, "success");
   };
@@ -1331,6 +1373,7 @@ export default function HomePage() {
             setIsSidebarOpen(false);
             saveSidebarState(false);
           }}
+          onRefreshSessions={() => loadSessionsList(false)}
         />
 
         {/* Main Workspace */}
@@ -1962,6 +2005,7 @@ export default function HomePage() {
             apiKeys={apiKeys}
             onSave={handleSaveKeys}
             onClose={() => setModal("none")}
+            onRefreshSessions={() => loadSessionsList(false)}
           />
         )}
       </AnimatePresence>

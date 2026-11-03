@@ -1,11 +1,12 @@
 "use client";
 
 import { useState, useCallback, useEffect } from "react";
-import { X, Upload, Key, Check, AlertCircle, FileText, Shield, Layers, Cpu, CheckCircle2, Lock, Trash2, RefreshCw } from "lucide-react";
+import { X, Upload, Key, Check, AlertCircle, FileText, Shield, Layers, Cpu, CheckCircle2, Lock, Trash2, RefreshCw, HardDrive, Download, Database } from "lucide-react";
 import { useDropzone } from "react-dropzone";
 import { motion, AnimatePresence } from "framer-motion";
 import { ApiKeys, Document, KeyStatus } from "@/lib/types";
 import { uploadDocumentToSession, fetchKeyStatus, saveSecureKeys, clearSecureKeys } from "@/lib/api";
+import { downloadChatsBackupFile, importChatsBackupJson, getLocalStats } from "@/lib/localStorageStore";
 import NeuralWaveform from "./NeuralWaveform";
 
 // ── API Key Modal (HTTP-Only Cookie & Backend Proxy Security) ─────────────────
@@ -14,9 +15,41 @@ interface ApiKeyModalProps {
   apiKeys?: ApiKeys;
   onSave?: (keys: ApiKeys) => void;
   onClose: () => void;
+  onRefreshSessions?: () => void;
 }
 
-export function ApiKeyModal({ apiKeys, onSave, onClose }: ApiKeyModalProps) {
+export function ApiKeyModal({ apiKeys, onSave, onClose, onRefreshSessions }: ApiKeyModalProps) {
+  const [localStats, setLocalStats] = useState(() => getLocalStats());
+  const [backupStatus, setBackupStatus] = useState<string | null>(null);
+
+  const handleDownloadBackup = () => {
+    downloadChatsBackupFile();
+    setBackupStatus("✓ Backup JSON downloaded to this device");
+    setTimeout(() => setBackupStatus(null), 3500);
+  };
+
+  const handleFileImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const res = await importChatsBackupJson(text);
+      if (res.success) {
+        setLocalStats(getLocalStats());
+        setBackupStatus(`✓ Restored ${res.sessionCount} conversations (${res.messageCount} messages)`);
+        onRefreshSessions?.();
+        setTimeout(() => setBackupStatus(null), 4000);
+      } else {
+        setBackupStatus(`⚠️ ${res.error || "Failed to restore backup"}`);
+        setTimeout(() => setBackupStatus(null), 4000);
+      }
+    } catch {
+      setBackupStatus("⚠️ Invalid backup JSON file");
+      setTimeout(() => setBackupStatus(null), 3000);
+    } finally {
+      e.target.value = "";
+    }
+  };
   const [keys, setKeys] = useState<ApiKeys>(apiKeys || { gemini: "", groq: "", openrouter: "" });
   const [status, setStatus] = useState<KeyStatus>({
     gemini_configured: false,
@@ -261,6 +294,154 @@ export function ApiKeyModal({ apiKeys, onSave, onClose }: ApiKeyModalProps) {
               </button>
             )}
           </div>
+
+          {/* Local System Storage & Chat Persistence */}
+          <div
+            style={{
+              marginTop: 20,
+              paddingTop: 16,
+              borderTop: "1px solid rgba(255, 255, 255, 0.08)",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                marginBottom: 8,
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <HardDrive size={15} color="#10b981" />
+                <span style={{ fontSize: 13, fontWeight: 600, color: "#fff" }}>
+                  Local System Storage &amp; Chat Persistence
+                </span>
+              </div>
+              <span
+                style={{
+                  fontSize: 10,
+                  padding: "2px 8px",
+                  borderRadius: 12,
+                  background: "rgba(16, 185, 129, 0.15)",
+                  color: "#6ee7b7",
+                  border: "1px solid rgba(16, 185, 129, 0.3)",
+                  fontWeight: 600,
+                }}
+              >
+                ● Saved on Local Device
+              </span>
+            </div>
+
+            <p
+              style={{
+                fontSize: 11.5,
+                color: "rgba(255, 255, 255, 0.65)",
+                lineHeight: 1.5,
+                marginBottom: 12,
+              }}
+            >
+              All conversations and messages are stored directly in your browser&apos;s local storage on this computer and synchronized with the backend. Even if the cloud server sleeps or your free-tier PostgreSQL database pauses after inactivity, your chats remain completely preserved on this machine.
+            </p>
+
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 1fr",
+                gap: 8,
+                marginBottom: 12,
+              }}
+            >
+              <div
+                style={{
+                  padding: "8px 12px",
+                  borderRadius: 6,
+                  background: "rgba(255, 255, 255, 0.03)",
+                  border: "1px solid rgba(255, 255, 255, 0.06)",
+                }}
+              >
+                <div style={{ fontSize: 10, color: "rgba(255, 255, 255, 0.45)" }}>Preserved Chats</div>
+                <div style={{ fontSize: 14, fontWeight: 600, color: "#fff", marginTop: 2 }}>
+                  {localStats.totalSessions} Conversations
+                </div>
+              </div>
+              <div
+                style={{
+                  padding: "8px 12px",
+                  borderRadius: 6,
+                  background: "rgba(255, 255, 255, 0.03)",
+                  border: "1px solid rgba(255, 255, 255, 0.06)",
+                }}
+              >
+                <div style={{ fontSize: 10, color: "rgba(255, 255, 255, 0.45)" }}>Preserved Messages</div>
+                <div style={{ fontSize: 14, fontWeight: 600, color: "#fff", marginTop: 2 }}>
+                  {localStats.totalMessages} Messages
+                </div>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", gap: 8 }}>
+              <motion.button
+                type="button"
+                className="btn btn-outline"
+                onClick={handleDownloadBackup}
+                style={{
+                  flex: 1,
+                  fontSize: 11,
+                  padding: "7px 10px",
+                  justifyContent: "center",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                }}
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+              >
+                <Download size={13} />
+                <span>Export Chats (JSON)</span>
+              </motion.button>
+
+              <label
+                className="btn btn-outline"
+                style={{
+                  flex: 1,
+                  fontSize: 11,
+                  padding: "7px 10px",
+                  justifyContent: "center",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  cursor: "pointer",
+                  margin: 0,
+                }}
+              >
+                <Upload size={13} />
+                <span>Import Chats (JSON)</span>
+                <input
+                  type="file"
+                  accept=".json"
+                  style={{ display: "none" }}
+                  onChange={handleFileImport}
+                />
+              </label>
+            </div>
+
+            {backupStatus && (
+              <div
+                style={{
+                  marginTop: 8,
+                  padding: "6px 10px",
+                  borderRadius: 6,
+                  fontSize: 11,
+                  background: backupStatus.startsWith("✓")
+                    ? "rgba(16, 185, 129, 0.15)"
+                    : "rgba(239, 68, 68, 0.15)",
+                  color: backupStatus.startsWith("✓") ? "#6ee7b7" : "#fca5a5",
+                }}
+              >
+                {backupStatus}
+              </div>
+            )}
+          </div>
         </div>
       </motion.div>
     </motion.div>
@@ -275,6 +456,7 @@ interface DocumentUploadModalProps {
   sessionId: string;
   apiKeys?: ApiKeys;
   onClose: () => void;
+  onRefreshSessions?: () => void;
   onUploaded: (doc: Document) => void;
 }
 

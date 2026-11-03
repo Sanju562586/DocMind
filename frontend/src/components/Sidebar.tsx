@@ -22,11 +22,15 @@ import {
   PinOff,
   Tag,
   Globe,
+  HardDrive,
+  Download,
+  Upload,
 } from "lucide-react";
 import { format, isToday, isYesterday, parseISO, isValid } from "date-fns";
 import { motion, AnimatePresence } from "framer-motion";
 import { Session, ApiKeys } from "@/lib/types";
 import { deleteSession, deleteAllSessions, renameSession } from "@/lib/api";
+import { downloadChatsBackupFile, importChatsBackupJson } from "@/lib/localStorageStore";
 import { useAuth } from "@/lib/auth";
 
 interface SidebarProps {
@@ -47,6 +51,7 @@ interface SidebarProps {
   onOpenMemoryInspector?: () => void;
   onOpenUrlIngest?: () => void;
   onCloseSidebar: () => void;
+  onRefreshSessions?: () => void;
 }
 
 function parseDateSafe(val?: string | null): Date {
@@ -92,12 +97,41 @@ export default function Sidebar({
   onOpenMemoryInspector,
   onOpenUrlIngest,
   onCloseSidebar,
+  onRefreshSessions,
 }: SidebarProps) {
   const { user, openAuthModal } = useAuth();
   const [searchQuery, setSearchQuery] = useState("");
   const [deletingSession, setDeletingSession] = useState<string | null>(null);
   const [confirmClearAll, setConfirmClearAll] = useState(false);
   const [isClearingAll, setIsClearingAll] = useState(false);
+  const [importNotification, setImportNotification] = useState<string | null>(null);
+
+  const handleExportBackup = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    downloadChatsBackupFile();
+  };
+
+  const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const res = await importChatsBackupJson(text);
+      if (res.success) {
+        setImportNotification(`✓ Restored ${res.sessionCount} chats`);
+        setTimeout(() => setImportNotification(null), 3500);
+        onRefreshSessions?.();
+      } else {
+        setImportNotification(`⚠️ ${res.error || "Failed to restore backup"}`);
+        setTimeout(() => setImportNotification(null), 4000);
+      }
+    } catch {
+      setImportNotification("⚠️ Failed to parse backup file");
+      setTimeout(() => setImportNotification(null), 3000);
+    } finally {
+      e.target.value = "";
+    }
+  };
 
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState("");
@@ -381,6 +415,95 @@ export default function Sidebar({
 
       {/* Scrollable Conversation Sessions List */}
       <div className="sidebar-scrollable">
+        {/* Local System Storage Persistence Badge & Actions */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            padding: "4px 8px",
+            marginBottom: 6,
+            borderRadius: 6,
+            background: "rgba(16, 185, 129, 0.07)",
+            border: "1px solid rgba(16, 185, 129, 0.18)",
+            fontSize: 10,
+            color: "#6ee7b7",
+          }}
+        >
+          <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
+            <span
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: "50%",
+                background: "#10b981",
+                display: "inline-block",
+                boxShadow: "0 0 6px #10b981",
+              }}
+            />
+            <HardDrive size={11} color="#10b981" />
+            <span style={{ fontWeight: 500 }}>Saved in local system</span>
+          </span>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <label
+              style={{
+                cursor: "pointer",
+                color: "#93c5fd",
+                display: "flex",
+                alignItems: "center",
+                gap: 2,
+                fontSize: 9.5,
+              }}
+              title="Import conversations from backup JSON file"
+            >
+              <Upload size={10} />
+              <span>Import</span>
+              <input
+                type="file"
+                accept=".json"
+                style={{ display: "none" }}
+                onChange={handleImportFile}
+              />
+            </label>
+            <span style={{ opacity: 0.3 }}>|</span>
+            <button
+              type="button"
+              onClick={handleExportBackup}
+              style={{
+                background: "transparent",
+                border: "none",
+                color: "#a78bfa",
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                gap: 2,
+                fontSize: 9.5,
+                padding: 0,
+              }}
+              title="Download backup JSON of all chats to your computer"
+            >
+              <Download size={10} />
+              <span>Export</span>
+            </button>
+          </div>
+        </div>
+
+        {importNotification && (
+          <div
+            style={{
+              padding: "4px 8px",
+              marginBottom: 6,
+              borderRadius: 5,
+              background: importNotification.startsWith("✓") ? "rgba(16, 185, 129, 0.15)" : "rgba(239, 68, 68, 0.15)",
+              color: importNotification.startsWith("✓") ? "#6ee7b7" : "#fca5a5",
+              fontSize: 10.5,
+              fontWeight: 500,
+            }}
+          >
+            {importNotification}
+          </div>
+        )}
+
         <div className="sidebar-section-header">
           <span className="sidebar-section-title">
             Conversations ({filteredSessions.length})

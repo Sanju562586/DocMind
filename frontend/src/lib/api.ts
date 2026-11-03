@@ -1,6 +1,19 @@
 // API client — all calls go through Next.js proxy or direct backend URL
 
 import { ApiKeys, Document, Message, Session, Source, MemoryItem, SystemStats, KeyStatus, HealthStatus, SharedSession } from "./types";
+import {
+  getLocalSessions,
+  saveLocalSession,
+  saveAllLocalSessions,
+  deleteLocalSession,
+  clearAllLocalSessions,
+  getLocalMessages,
+  saveLocalMessages,
+  appendLocalMessage,
+  mergeSessions,
+  mergeMessages,
+  getAllSessionsWithMessages,
+} from "./localStorageStore";
 
 const API_BASE = process.env.NEXT_PUBLIC_DIRECT_API === "true" && process.env.NEXT_PUBLIC_BACKEND_URL
   ? `${process.env.NEXT_PUBLIC_BACKEND_URL.replace(/\/+$/, "").replace(/\/api$/, "")}/api`
@@ -266,7 +279,21 @@ export async function checkBackendHealth(): Promise<HealthStatus> {
 
 // ── Sessions ───────────────────────────────────────────────────────────────
 
+// ── Sessions & Local System Storage ────────────────────────────────────────
+
 export async function createSession(title: string = "New Conversation"): Promise<string> {
+  const localId = `sess_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  const now = new Date().toISOString();
+  const localSession: Session = {
+    id: localId,
+    title,
+    created_at: now,
+    updated_at: now,
+    documents: [],
+    message_count: 0,
+  };
+  saveLocalSession(localSession);
+
   try {
     const res = await fetchWithRetry(`${API_BASE}/sessions`, {
       method: "POST",
@@ -274,79 +301,17 @@ export async function createSession(title: string = "New Conversation"): Promise
       body: JSON.stringify({ title }),
     });
     const data = await handleResponse<{ session_id: string; title: string }>(res, "Failed to create session");
-    return data.session_id;
+    if (data.session_id && data.session_id !== localId) {
+      deleteLocalSession(localId);
+      localSession.id = data.session_id;
+      saveLocalSession(localSession);
+      return data.session_id;
+    }
+    return localId;
   } catch (err) {
-    throw new Error(parseErrorMessage(err, "Failed to create session"));
+    console.warn("Backend session creation deferred; conversation safely initialized in local storage:", err);
+    return localId;
   }
-}
-
-// LocalStorage caching helpers for permanent cross-session & restart recovery (strictly scoped per user)
-function getCurrentUserId(): string {
-  if (typeof window === "undefined") return "default_user";
-  try {
-    let cookieUser: any = null;
-    if (typeof document !== "undefined") {
-      const cookies = document.cookie.split(";");
-      for (let c of cookies) {
-        c = c.trim();
-        if (c.startsWith("docmind_user=")) {
-          const val = c.substring("docmind_user=".length);
-          cookieUser = parseUserJson(val);
-          break;
-        }
-      }
-    }
-    let lsUser: any = null;
-    if (typeof localStorage !== "undefined") {
-      lsUser = parseUserJson(localStorage.getItem("docmind_user"));
-    }
-    const effectiveUser = (cookieUser && (!cookieUser.isDemo || !lsUser)) ? cookieUser : (lsUser || cookieUser);
-    return effectiveUser?.id ? String(effectiveUser.id).trim() : "default_user";
-  } catch {
-    return "default_user";
-  }
-}
-
-function getSessionsCacheKey(): string {
-  return `docmind_persistent_sessions_${getCurrentUserId()}`;
-}
-
-function getMessagesCachePrefix(): string {
-  return `docmind_cached_msgs_${getCurrentUserId()}_`;
-}
-
-function getLocalCachedSessions(): Session[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = localStorage.getItem(getSessionsCacheKey());
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
-}
-
-function setLocalCachedSessions(sessions: Session[]): void {
-  if (typeof window === "undefined" || !Array.isArray(sessions)) return;
-  try {
-    localStorage.setItem(getSessionsCacheKey(), JSON.stringify(sessions));
-  } catch {}
-}
-
-function getLocalCachedMessages(sessionId: string): Message[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = localStorage.getItem(`${getMessagesCachePrefix()}${sessionId}`);
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
-}
-
-function setLocalCachedMessages(sessionId: string, msgs: Message[]): void {
-  if (typeof window === "undefined" || !Array.isArray(msgs)) return;
-  try {
-    localStorage.setItem(`${getMessagesCachePrefix()}${sessionId}`, JSON.stringify(msgs));
-  } catch {}
 }
 
 export async function restoreSessionsToBackend(sessions: any[]): Promise<void> {
@@ -358,84 +323,90 @@ export async function restoreSessionsToBackend(sessions: any[]): Promise<void> {
       body: JSON.stringify({ sessions }),
     });
   } catch (err) {
-    console.warn("Session auto-restoration notice:", err);
+    console.debug("Session auto-restoration notice:", err);
   }
 }
 
 export async function listSessions(): Promise<Session[]> {
+  const localSessions = getLocalSessions();
+
   try {
     const res = await fetchWithRetry(`${API_BASE}/sessions`, { cache: "no-store" });
     const remoteSessions = await handleResponse<Session[]>(res, "Failed to fetch sessions");
 
-    // Clean up legacy unscoped key if present
-    try {
-      localStorage.removeItem("docmind_persistent_sessions_v1");
-    } catch {}
-
-    // If remote returned valid sessions, update local backup cache
     if (Array.isArray(remoteSessions)) {
-      if (remoteSessions.length > 0) {
-        setLocalCachedSessions(remoteSessions);
-        return remoteSessions;
-      } else {
-        // Current user has no sessions on the server: clear local cache for this user
-        setLocalCachedSessions([]);
-        return [];
-      }
-    }
+      // Merge remote with local so conversations stored in local system are NEVER lost
+      const merged = mergeSessions(localSessions, remoteSessions);
 
-    return [];
-  } catch (err) {
-    // If backend is offline / unreachable, fallback seamlessly to local browser cache
-    const cached = getLocalCachedSessions();
-    if (cached.length > 0) {
-      return cached;
+      // If local storage has sessions that the server is missing (e.g. free-tier DB paused or cold-started),
+      // re-hydrate the backend database in the background.
+      const missingOnServer = localSessions.filter(
+        (ls) => !remoteSessions.some((rs) => rs.id === ls.id)
+      );
+      if (missingOnServer.length > 0) {
+        const fullBackup = getAllSessionsWithMessages().filter((s) =>
+          missingOnServer.some((m) => m.id === s.id)
+        );
+        restoreSessionsToBackend(fullBackup).catch(() => {});
+      }
+
+      return merged;
     }
-    throw new Error(parseErrorMessage(err, "Failed to fetch sessions"));
+    return localSessions;
+  } catch (err) {
+    console.warn("Remote backend offline/sleeping; serving conversations from local system storage:", err);
+    return localSessions;
   }
 }
 
 export async function getSession(sessionId: string): Promise<Session> {
+  const local = getLocalSessions().find((s) => s.id === sessionId);
   try {
     const res = await fetchWithRetry(`${API_BASE}/sessions/${sessionId}`);
-    return await handleResponse<Session>(res, "Failed to fetch session");
+    const remote = await handleResponse<Session>(res, "Failed to fetch session");
+    if (remote && remote.id) {
+      saveLocalSession(remote);
+      return remote;
+    }
   } catch (err) {
-    // Fallback to cached session metadata if server unavailable
-    const cached = getLocalCachedSessions().find((s) => s.id === sessionId);
-    if (cached) return cached;
-    throw new Error(parseErrorMessage(err, "Failed to fetch session"));
+    console.debug("Remote getSession notice, serving local session:", err);
   }
+  if (local) return local;
+  throw new Error("Conversation not found");
 }
 
 export async function deleteSession(sessionId: string): Promise<void> {
+  deleteLocalSession(sessionId);
   try {
     const res = await fetchWithRetry(`${API_BASE}/sessions/${sessionId}`, { method: "DELETE" });
     await handleResponse<{ status: string }>(res, "Failed to delete session");
-  } finally {
-    const cached = getLocalCachedSessions().filter((s) => s.id !== sessionId);
-    setLocalCachedSessions(cached);
-    try {
-      localStorage.removeItem(`${getMessagesCachePrefix()}${sessionId}`);
-      localStorage.removeItem(`docmind_cached_msgs_${sessionId}`);
-    } catch {}
+  } catch (err) {
+    console.warn("Backend session deletion notice:", err);
   }
 }
 
 export async function getMessages(sessionId: string): Promise<Message[]> {
+  const localMsgs = getLocalMessages(sessionId);
   try {
     const res = await fetchWithRetry(`${API_BASE}/sessions/${sessionId}/messages`);
-    const msgs = await handleResponse<Message[]>(res, "Failed to fetch messages");
-    if (Array.isArray(msgs) && msgs.length > 0) {
-      setLocalCachedMessages(sessionId, msgs);
+    const remoteMsgs = await handleResponse<Message[]>(res, "Failed to fetch messages");
+    if (Array.isArray(remoteMsgs)) {
+      const merged = mergeMessages(localMsgs, remoteMsgs);
+      saveLocalMessages(sessionId, merged);
+
+      // If local storage had messages missing on the remote server, re-hydrate server
+      if (remoteMsgs.length < localMsgs.length) {
+        const localSession = getLocalSessions().find((s) => s.id === sessionId);
+        if (localSession) {
+          restoreSessionsToBackend([{ ...localSession, messages: merged }]).catch(() => {});
+        }
+      }
+      return merged;
     }
-    return msgs;
   } catch (err) {
-    const cached = getLocalCachedMessages(sessionId);
-    if (cached.length > 0) {
-      return cached;
-    }
-    throw new Error(parseErrorMessage(err, "Failed to fetch messages"));
+    console.debug("Remote getMessages notice, serving from local system storage:", err);
   }
+  return localMsgs;
 }
 
 export async function getStats(): Promise<SystemStats> {
@@ -448,6 +419,10 @@ export async function getStats(): Promise<SystemStats> {
 }
 
 export async function renameSession(sessionId: string, title: string): Promise<string> {
+  const local = getLocalSessions().find((s) => s.id === sessionId);
+  if (local) {
+    saveLocalSession({ ...local, title, updated_at: new Date().toISOString() });
+  }
   try {
     const res = await fetchWithRetry(`${API_BASE}/sessions/${sessionId}/title`, {
       method: "PATCH",
@@ -455,24 +430,20 @@ export async function renameSession(sessionId: string, title: string): Promise<s
       body: JSON.stringify({ title }),
     });
     const data = await handleResponse<{ session_id: string; title: string }>(res, "Failed to rename session");
-    // Update local cache
-    const cached = getLocalCachedSessions().map((s) => (s.id === sessionId ? { ...s, title } : s));
-    setLocalCachedSessions(cached);
     return data.title;
   } catch (err) {
-    throw new Error(parseErrorMessage(err, "Failed to rename session"));
+    console.warn("Backend rename notice:", err);
+    return title;
   }
 }
 
 export async function deleteAllSessions(): Promise<void> {
+  clearAllLocalSessions();
   try {
     const res = await fetchWithRetry(`${API_BASE}/sessions`, { method: "DELETE" });
     await handleResponse<{ status: string }>(res, "Failed to delete all sessions");
-  } finally {
-    try {
-      localStorage.removeItem(getSessionsCacheKey());
-      localStorage.removeItem("docmind_persistent_sessions_v1");
-    } catch {}
+  } catch (err) {
+    console.warn("Backend clear all notice:", err);
   }
 }
 

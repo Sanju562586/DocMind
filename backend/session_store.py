@@ -104,7 +104,7 @@ class SessionStore:
                 if normalized_url.startswith("postgres://"):
                     normalized_url = "postgresql://" + normalized_url[len("postgres://"):]
                 try:
-                    self._pg_pool = pool.ThreadedConnectionPool(minconn=1, maxconn=20, dsn=normalized_url)
+                    self._pg_pool = self._create_pg_pool(normalized_url)
                     logger.info("SessionStore: Connected to PostgreSQL connection pool [OK]")
                 except Exception as exc:
                     logger.error("Failed to connect to PostgreSQL: %s. Falling back to SQLite at %s", exc, self.db_path)
@@ -364,20 +364,106 @@ class SessionStore:
 
         logger.info("PostgreSQL database tables and indexes initialized [OK]")
 
+    def _create_pg_pool(self, normalized_url: str):
+        """Create a PostgreSQL threaded connection pool with keepalive settings to resist idle drops."""
+        try:
+            return pool.ThreadedConnectionPool(
+                minconn=1,
+                maxconn=10,
+                dsn=normalized_url,
+                connect_timeout=10,
+                keepalives=1,
+                keepalives_idle=30,
+                keepalives_interval=10,
+                keepalives_count=5,
+            )
+        except Exception:
+            return pool.ThreadedConnectionPool(minconn=1, maxconn=10, dsn=normalized_url)
+
+    def _reconnect_postgres(self) -> bool:
+        """Attempt to re-establish the PostgreSQL connection pool."""
+        if not self.database_url or not _HAVE_PSYCOPG2:
+            return False
+        normalized_url = self.database_url
+        if normalized_url.startswith("postgres://"):
+            normalized_url = "postgresql://" + normalized_url[len("postgres://"):]
+        if self._pg_pool:
+            try:
+                self._pg_pool.closeall()
+            except Exception:
+                pass
+            self._pg_pool = None
+        try:
+            self._pg_pool = self._create_pg_pool(normalized_url)
+            self.is_postgres = True
+            logger.info("SessionStore: Reconnected to PostgreSQL connection pool [OK]")
+            return True
+        except Exception as exc:
+            logger.warning("SessionStore: Failed to reconnect to PostgreSQL (%s). Falling back to SQLite.", exc)
+            self.is_postgres = False
+            self._pg_pool = None
+            return False
+
+    def _get_pg_conn(self):
+        """Acquire a verified alive connection from PostgreSQL pool, reconnecting if dropped."""
+        if not self.is_postgres or not self._pg_pool:
+            return None
+        conn = None
+        for attempt in range(2):
+            try:
+                conn = self._pg_pool.getconn()
+                if conn.closed != 0:
+                    try:
+                        self._pg_pool.putconn(conn, close=True)
+                    except Exception:
+                        pass
+                    conn = None
+                    if not self._reconnect_postgres():
+                        break
+                    continue
+                # Aliveness check: catch idle disconnects from free-tier Postgres immediately
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1;")
+                return conn
+            except Exception as exc:
+                logger.warning("PostgreSQL connection stale or dropped (%s). Discarding and refreshing...", exc)
+                if conn:
+                    try:
+                        self._pg_pool.putconn(conn, close=True)
+                    except Exception:
+                        pass
+                    conn = None
+                if not self._reconnect_postgres():
+                    break
+        return None
+
     @contextmanager
     def _conn(self):
+        pg_conn = None
         if self.is_postgres and self._pg_pool:
-            pg_conn = self._pg_pool.getconn()
+            pg_conn = self._get_pg_conn()
+
+        if pg_conn:
             wrapper = _DBConnectionWrapper(pg_conn, is_postgres=True)
+            is_broken = False
             try:
                 yield wrapper
                 pg_conn.commit()
             except Exception:
-                pg_conn.rollback()
+                is_broken = True
+                try:
+                    pg_conn.rollback()
+                except Exception:
+                    pass
                 raise
             finally:
-                self._pg_pool.putconn(pg_conn)
+                try:
+                    self._pg_pool.putconn(pg_conn, close=is_broken)
+                except Exception:
+                    pass
         else:
+            # Fallback to local SQLite if PostgreSQL is not active or temporarily asleep
+            os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
             sq_conn = sqlite3.connect(self.db_path, timeout=15.0)
             sq_conn.row_factory = sqlite3.Row
             sq_conn.execute("PRAGMA journal_mode = WAL")
@@ -464,10 +550,15 @@ class SessionStore:
                 if not sid:
                     continue
 
-                # Ensure we never overwrite or restore into a session owned by another user
+                # Ensure we never overwrite or restore into a session owned by another user,
+                # but if previously unassigned or 'default_user', adopt it for target_user
                 existing = conn.execute("SELECT user_id FROM sessions WHERE id = ?", (sid,)).fetchone()
                 if existing and existing["user_id"] != target_user:
-                    continue
+                    if existing["user_id"] in ("default_user", None, "") and target_user != "default_user":
+                        conn.execute("UPDATE sessions SET user_id = ? WHERE id = ?", (target_user, sid))
+                        conn.execute("UPDATE documents SET user_id = ? WHERE session_id = ?", (target_user, sid))
+                    else:
+                        continue
 
                 title = s.get("title", "Conversation")
                 u_id = target_user
