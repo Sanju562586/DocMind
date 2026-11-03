@@ -66,17 +66,21 @@ import {
   clearAllMemories,
   saveSecureKeys,
   fetchKeyStatus,
+  getSessionChunks,
   QuizQuestion,
 } from "@/lib/api";
 import { exportSessionToPdf } from "@/lib/pdfExporter";
 import { ApiKeys, Document, Message, Session, Source, MemoryItem } from "@/lib/types";
 import {
   getLocalSessions,
+  saveLocalSession,
   getLocalMessages,
   appendLocalMessage,
   downloadChatsBackupFile,
   importChatsBackupJson,
   getLocalStats,
+  getLocalChunks,
+  saveLocalChunks,
 } from "@/lib/localStorageStore";
 import { AuthModal } from "@/components/AuthModal";
 import { useAuth } from "@/lib/auth";
@@ -1073,9 +1077,17 @@ export default function HomePage() {
       const updatedDocs = [...(activeSession.documents || []), doc];
       const updatedSession = { ...activeSession, documents: updatedDocs };
       setActiveSession(updatedSession);
+      saveLocalSession(updatedSession);
       setSessions((prev) =>
         prev.map((s) => (s.id === activeSession.id ? updatedSession : s))
       );
+
+      // Attempt to load and store chunks in client local storage
+      getSessionChunks(activeSession.id).then((chunks) => {
+        if (chunks && chunks.length > 0) {
+          saveLocalChunks(activeSession.id, chunks);
+        }
+      }).catch(() => {});
 
       // Post in-chat system notification announcing document attachment mid-conversation
       const sysMsg: Message = {
@@ -1127,6 +1139,12 @@ export default function HomePage() {
         );
 
         if (!stillProcessing) {
+          // Document processing finished — fetch and cache chunks strictly in local storage
+          getSessionChunks(activeSession.id).then((chunks) => {
+            if (chunks && chunks.length > 0) {
+              saveLocalChunks(activeSession.id, chunks);
+            }
+          }).catch(() => {});
           return;
         }
 

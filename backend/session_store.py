@@ -120,10 +120,34 @@ class SessionStore:
             self._init_postgres()
         else:
             self._init_sqlite()
+        # Document chunks are strictly stored in local storage (SQLite + disk) only, never remote Postgres
+        self._init_local_chunk_storage()
         try:
             self._migrate_npz_chunks_to_db()
         except Exception as exc:
             logger.debug('NPZ chunk migration notice: %s', exc)
+
+    def _init_local_chunk_storage(self):
+        """Initialize document_chunks table and indexes strictly in local SQLite storage."""
+        with self._local_sqlite_conn() as conn:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS document_chunks (
+                    id TEXT PRIMARY KEY,
+                    document_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    parent_index INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    contextual_text TEXT NOT NULL,
+                    parent_id TEXT NOT NULL,
+                    parent_text TEXT NOT NULL,
+                    metadata_json TEXT,
+                    created_at TEXT DEFAULT (datetime('now'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_chunks_session ON document_chunks(session_id);
+                CREATE INDEX IF NOT EXISTS idx_chunks_doc ON document_chunks(document_id);
+            """)
+        logger.info("SessionStore: Document chunks local storage table initialized at %s [OK]", self.db_path)
 
     def _init_sqlite(self):
         os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
@@ -289,20 +313,6 @@ class SessionStore:
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 );
 
-                                CREATE TABLE IF NOT EXISTS document_chunks (
-                    id VARCHAR(64) PRIMARY KEY,
-                    document_id VARCHAR(64) NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-                    session_id VARCHAR(64) NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-                    chunk_index INT NOT NULL,
-                    parent_index INT NOT NULL,
-                    text TEXT NOT NULL,
-                    contextual_text TEXT NOT NULL,
-                    parent_id VARCHAR(64) NOT NULL,
-                    parent_text TEXT NOT NULL,
-                    metadata_json TEXT,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-                );
-
                 CREATE TABLE IF NOT EXISTS messages (
                     id VARCHAR(64) PRIMARY KEY,
                     session_id VARCHAR(64) NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -325,8 +335,6 @@ class SessionStore:
 
                 CREATE INDEX IF NOT EXISTS idx_documents_session ON documents(session_id);
                 CREATE INDEX IF NOT EXISTS idx_documents_user ON documents(user_id);
-                CREATE INDEX IF NOT EXISTS idx_chunks_session ON document_chunks(session_id);
-                CREATE INDEX IF NOT EXISTS idx_chunks_doc ON document_chunks(document_id);
                 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
                 CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id, updated_at DESC);
@@ -480,6 +488,24 @@ class SessionStore:
             finally:
                 sq_conn.close()
 
+    @contextmanager
+    def _local_sqlite_conn(self):
+        """Connection context strictly dedicated to local SQLite storage (used for document chunks)."""
+        os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
+        sq_conn = sqlite3.connect(self.db_path, timeout=20.0)
+        sq_conn.row_factory = sqlite3.Row
+        sq_conn.execute("PRAGMA journal_mode = WAL")
+        sq_conn.execute("PRAGMA synchronous = NORMAL")
+        sq_conn.execute("PRAGMA busy_timeout = 20000")
+        try:
+            yield sq_conn
+            sq_conn.commit()
+        except Exception:
+            sq_conn.rollback()
+            raise
+        finally:
+            sq_conn.close()
+
     def close(self):
         """Cleanly close connection pools on application shutdown."""
         if self._pg_pool:
@@ -609,6 +635,14 @@ class SessionStore:
                         (mid, sid, role, content, sources_json, memory_json, m_created),
                     )
                     restored_messages += 1
+
+                # Restore document chunks into local storage only
+                chunks = s.get("chunks", [])
+                if chunks:
+                    try:
+                        self.save_chunks(chunks)
+                    except Exception as ch_err:
+                        logger.debug("Failed restoring local chunks for session %s: %s", sid, ch_err)
 
         return {
             "restored_sessions": restored_sessions,
@@ -1671,14 +1705,22 @@ class SessionStore:
         """Delete all sessions belonging to user (or all if not specified)."""
         if not user_id:
             return
+        sids = []
         with self._conn() as conn:
             clause, p = self._user_filter(user_id, "user_id")
-            conn.execute(
-                f"DELETE FROM document_chunks WHERE session_id IN (SELECT id FROM sessions WHERE {clause})",
-                tuple(p),
-            )
+            try:
+                sids = [r["id"] for r in conn.execute(f"SELECT id FROM sessions WHERE {clause}", tuple(p)).fetchall()]
+            except Exception:
+                pass
             conn.execute(f"DELETE FROM sessions WHERE {clause}", tuple(p))
             conn.execute(f"DELETE FROM global_memory WHERE {clause}", tuple(p))
+        if sids:
+            try:
+                with self._local_sqlite_conn() as l_conn:
+                    placeholders = ",".join(["?"] * len(sids))
+                    l_conn.execute(f"DELETE FROM document_chunks WHERE session_id IN ({placeholders})", tuple(sids))
+            except Exception as exc:
+                logger.debug("Local chunks clear notice: %s", exc)
         self._cloud_delete_all_sessions(user_id=user_id)
 
     def get_stats(self, user_id: Optional[str] = None) -> Dict[str, Any]:
@@ -1757,10 +1799,10 @@ class SessionStore:
     # ──────────────────────────────────────────────
 
     def save_chunks(self, chunks: List[Any]) -> None:
-        """Persist document chunks locally into database for robust local retrieval."""
+        """Persist document chunks strictly into local SQLite storage only (never remote Postgres)."""
         if not chunks:
             return
-        with self._conn() as conn:
+        with self._local_sqlite_conn() as conn:
             for c in chunks:
                 c_id = getattr(c, "id", None) or (c.get("id") if isinstance(c, dict) else None)
                 doc_id = getattr(c, "doc_id", None) or (c.get("doc_id") if isinstance(c, dict) else None)
@@ -1782,27 +1824,16 @@ class SessionStore:
                 )
 
     def get_chunks_for_session(self, session_id: str, user_id: Optional[str] = None) -> List[Any]:
-        """Retrieve all persisted chunks for a session ordered by chunk_index."""
+        """Retrieve all persisted chunks for a session strictly from local storage ordered by chunk_index."""
         from chunker import Chunk
-        with self._conn() as conn:
-            if user_id:
-                clause, p = self._user_filter(user_id, "s.user_id")
-                rows = conn.execute(
-                    f"""SELECT c.id, c.document_id, c.session_id, c.chunk_index, c.parent_index, c.text, c.contextual_text, c.parent_id, c.parent_text, c.metadata_json 
-                       FROM document_chunks c
-                       JOIN sessions s ON c.session_id = s.id
-                       WHERE c.session_id = ? AND {clause}
-                       ORDER BY c.chunk_index ASC""",
-                    (session_id, *p),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """SELECT id, document_id, session_id, chunk_index, parent_index, text, contextual_text, parent_id, parent_text, metadata_json 
-                       FROM document_chunks 
-                       WHERE session_id = ? 
-                       ORDER BY chunk_index ASC""",
-                    (session_id,),
-                ).fetchall()
+        with self._local_sqlite_conn() as conn:
+            rows = conn.execute(
+                """SELECT id, document_id, session_id, chunk_index, parent_index, text, contextual_text, parent_id, parent_text, metadata_json 
+                   FROM document_chunks 
+                   WHERE session_id = ? 
+                   ORDER BY chunk_index ASC""",
+                (session_id,),
+            ).fetchall()
             chunks = []
             for r in rows:
                 meta = json.loads(r["metadata_json"]) if r["metadata_json"] else {}
@@ -1822,27 +1853,16 @@ class SessionStore:
             return chunks
 
     def get_chunks_for_document(self, doc_id: str, user_id: Optional[str] = None) -> List[Any]:
-        """Retrieve all persisted chunks for a specific document."""
+        """Retrieve all persisted chunks for a specific document strictly from local storage."""
         from chunker import Chunk
-        with self._conn() as conn:
-            if user_id:
-                clause, p = self._user_filter(user_id, "s.user_id")
-                rows = conn.execute(
-                    f"""SELECT c.id, c.document_id, c.session_id, c.chunk_index, c.parent_index, c.text, c.contextual_text, c.parent_id, c.parent_text, c.metadata_json 
-                       FROM document_chunks c
-                       JOIN sessions s ON c.session_id = s.id
-                       WHERE c.document_id = ? AND {clause}
-                       ORDER BY c.chunk_index ASC""",
-                    (doc_id, *p),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """SELECT id, document_id, session_id, chunk_index, parent_index, text, contextual_text, parent_id, parent_text, metadata_json 
-                       FROM document_chunks 
-                       WHERE document_id = ? 
-                       ORDER BY chunk_index ASC""",
-                    (doc_id,),
-                ).fetchall()
+        with self._local_sqlite_conn() as conn:
+            rows = conn.execute(
+                """SELECT id, document_id, session_id, chunk_index, parent_index, text, contextual_text, parent_id, parent_text, metadata_json 
+                   FROM document_chunks 
+                   WHERE document_id = ? 
+                   ORDER BY chunk_index ASC""",
+                (doc_id,),
+            ).fetchall()
             chunks = []
             for r in rows:
                 meta = json.loads(r["metadata_json"]) if r["metadata_json"] else {}
@@ -1862,15 +1882,17 @@ class SessionStore:
             return chunks
 
     def delete_chunks_for_session(self, session_id: str) -> None:
-        with self._conn() as conn:
+        """Delete all chunks for a session strictly from local SQLite storage."""
+        with self._local_sqlite_conn() as conn:
             conn.execute("DELETE FROM document_chunks WHERE session_id = ?", (session_id,))
 
     def delete_chunks_for_document(self, doc_id: str) -> None:
-        with self._conn() as conn:
+        """Delete all chunks for a document strictly from local SQLite storage."""
+        with self._local_sqlite_conn() as conn:
             conn.execute("DELETE FROM document_chunks WHERE document_id = ?", (doc_id,))
 
     def _migrate_npz_chunks_to_db(self):
-        """Auto-scan disk index directories and populate document_chunks table with any existing chunks."""
+        """Auto-scan disk index directories and populate local storage document_chunks table with any existing chunks."""
         index_dirs = [
             os.path.join(os.path.dirname(os.path.abspath(self.db_path)), "indexes"),
             "./data/indexes",
@@ -1889,7 +1911,7 @@ class SessionStore:
                     sid = fname[len("session_"):-len(".npz")]
                     npz_path = os.path.join(abs_d, fname)
                     try:
-                        with self._conn() as conn:
+                        with self._local_sqlite_conn() as conn:
                             existing = conn.execute(
                                 "SELECT COUNT(*) as c FROM document_chunks WHERE session_id = ?", (sid,)
                             ).fetchone()
@@ -1902,7 +1924,7 @@ class SessionStore:
                         if chunks_data:
                             self.save_chunks(chunks_data)
                             total_migrated += len(chunks_data)
-                            logger.info("Migrated %d chunks from %s into document_chunks table [OK]", len(chunks_data), fname)
+                            logger.info("Migrated %d chunks from %s into local storage document_chunks table [OK]", len(chunks_data), fname)
                     except Exception as exc:
                         logger.debug("NPZ chunk migration notice for %s: %s", fname, exc)
         if total_migrated > 0:

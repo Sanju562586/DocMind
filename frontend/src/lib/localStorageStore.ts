@@ -5,6 +5,7 @@ import { Session, Message, Document } from "./types";
 
 export const LOCAL_SESSIONS_KEY = "docmind_local_sessions_v2";
 export const LOCAL_MSGS_PREFIX = "docmind_local_msgs_v2_";
+export const LOCAL_CHUNKS_PREFIX = "docmind_local_chunks_v2_";
 export const LOCAL_BACKUP_META_KEY = "docmind_local_backup_meta";
 
 function safeJsonParse<T>(raw: string | null, fallback: T): T {
@@ -150,7 +151,7 @@ export function saveAllLocalSessions(sessions: Session[]): void {
 }
 
 /**
- * Delete a session and all its messages from local system storage.
+ * Delete a session, all its messages, and document chunks from local system storage.
  */
 export function deleteLocalSession(sessionId: string): void {
   if (typeof window === "undefined" || !sessionId) return;
@@ -158,6 +159,7 @@ export function deleteLocalSession(sessionId: string): void {
     const current = getLocalSessions().filter((s) => s.id !== sessionId);
     localStorage.setItem(LOCAL_SESSIONS_KEY, JSON.stringify(current));
     localStorage.removeItem(`${LOCAL_MSGS_PREFIX}${sessionId}`);
+    deleteLocalChunks(sessionId);
     updateLastSavedMeta();
   } catch (err) {
     console.warn("Failed to delete local session:", err);
@@ -165,7 +167,7 @@ export function deleteLocalSession(sessionId: string): void {
 }
 
 /**
- * Clear all conversations and messages from local system storage.
+ * Clear all conversations, messages, and document chunks from local system storage.
  */
 export function clearAllLocalSessions(): void {
   if (typeof window === "undefined") return;
@@ -173,12 +175,77 @@ export function clearAllLocalSessions(): void {
     const sessions = getLocalSessions();
     for (const s of sessions) {
       localStorage.removeItem(`${LOCAL_MSGS_PREFIX}${s.id}`);
+      deleteLocalChunks(s.id);
     }
     localStorage.removeItem(LOCAL_SESSIONS_KEY);
+    clearAllLocalChunks();
     updateLastSavedMeta();
   } catch (err) {
     console.warn("Failed to clear local sessions:", err);
   }
+}
+
+/**
+ * Retrieve all document chunks stored strictly in local system storage for a session.
+ */
+export function getLocalChunks(sessionId: string): any[] {
+  if (typeof window === "undefined" || !sessionId) return [];
+  try {
+    const raw = localStorage.getItem(`${LOCAL_CHUNKS_PREFIX}${sessionId}`);
+    const parsed = safeJsonParse<any[]>(raw, []);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Save document chunks strictly in client-side local storage.
+ */
+export function saveLocalChunks(sessionId: string, chunks: any[]): void {
+  if (typeof window === "undefined" || !sessionId || !Array.isArray(chunks)) return;
+  try {
+    const existing = getLocalChunks(sessionId);
+    const chunkMap = new Map<string, any>();
+    for (const c of existing) {
+      if (c && c.id) chunkMap.set(c.id, c);
+    }
+    for (const c of chunks) {
+      if (c && c.id) chunkMap.set(c.id, c);
+    }
+    const merged = Array.from(chunkMap.values()).sort(
+      (a, b) => (a.chunk_index || 0) - (b.chunk_index || 0)
+    );
+    localStorage.setItem(`${LOCAL_CHUNKS_PREFIX}${sessionId}`, JSON.stringify(merged));
+    updateLastSavedMeta();
+  } catch (err) {
+    console.warn("Failed to store chunks in local storage:", err);
+  }
+}
+
+/**
+ * Delete all document chunks for a session from local storage.
+ */
+export function deleteLocalChunks(sessionId: string): void {
+  if (typeof window === "undefined" || !sessionId) return;
+  try {
+    localStorage.removeItem(`${LOCAL_CHUNKS_PREFIX}${sessionId}`);
+  } catch {}
+}
+
+/**
+ * Clear all document chunks across all sessions from local storage.
+ */
+export function clearAllLocalChunks(): void {
+  if (typeof window === "undefined") return;
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith(LOCAL_CHUNKS_PREFIX)) {
+        localStorage.removeItem(key);
+      }
+    }
+  } catch {}
 }
 
 /**
@@ -342,26 +409,32 @@ export function mergeMessages(localMsgs: Message[], remoteMsgs: Message[]): Mess
 }
 
 /**
- * Retrieve all local sessions bundled with their complete message arrays (useful for cloud sync or backup).
+ * Retrieve all local sessions bundled with their complete message and chunk arrays (useful for cloud sync or backup).
  */
-export function getAllSessionsWithMessages(): Array<Session & { messages: Message[] }> {
+export function getAllSessionsWithMessages(): Array<Session & { messages: Message[]; chunks: any[] }> {
   const sessions = getLocalSessions();
   return sessions.map((s) => ({
     ...s,
     messages: getLocalMessages(s.id),
+    chunks: getLocalChunks(s.id),
   }));
 }
 
 /**
- * Generate a complete JSON backup of all conversations, documents, and messages on this local device.
+ * Generate a complete JSON backup of all conversations, documents, messages, and document chunks on this local device.
  */
 export function exportChatsBackupJson(): string {
   const allData = getAllSessionsWithMessages();
+  let totalChunks = 0;
+  for (const d of allData) {
+    totalChunks += d.chunks.length;
+  }
   const backup = {
     app: "DocMind Document Intelligence",
-    version: 2,
+    version: 3,
     exported_at: new Date().toISOString(),
     total_sessions: allData.length,
+    total_chunks: totalChunks,
     sessions: allData,
   };
   return JSON.stringify(backup, null, 2);
@@ -390,20 +463,21 @@ export function downloadChatsBackupFile(): void {
 }
 
 /**
- * Restore and merge conversations and messages from a local .json backup file.
+ * Restore and merge conversations, messages, and document chunks from a local .json backup file.
  */
 export async function importChatsBackupJson(
   jsonString: string
-): Promise<{ success: boolean; sessionCount: number; messageCount: number; error?: string }> {
+): Promise<{ success: boolean; sessionCount: number; messageCount: number; chunkCount: number; error?: string }> {
   try {
     const parsed = JSON.parse(jsonString);
     const sessionsToImport: any[] = Array.isArray(parsed) ? parsed : (parsed.sessions || []);
     if (!Array.isArray(sessionsToImport) || sessionsToImport.length === 0) {
-      return { success: false, sessionCount: 0, messageCount: 0, error: "No valid conversation sessions found in backup file" };
+      return { success: false, sessionCount: 0, messageCount: 0, chunkCount: 0, error: "No valid conversation sessions found in backup file" };
     }
 
     let sessionCount = 0;
     let messageCount = 0;
+    let chunkCount = 0;
 
     for (const rawSess of sessionsToImport) {
       const sid = rawSess.id || rawSess.session_id;
@@ -430,35 +504,44 @@ export async function importChatsBackupJson(
         saveLocalMessages(sid, msgs);
         messageCount += msgs.length;
       }
+
+      const chunks: any[] = Array.isArray(rawSess.chunks) ? rawSess.chunks : [];
+      if (chunks.length > 0) {
+        saveLocalChunks(sid, chunks);
+        chunkCount += chunks.length;
+      }
     }
 
     updateLastSavedMeta();
-    return { success: true, sessionCount, messageCount };
+    return { success: true, sessionCount, messageCount, chunkCount };
   } catch (err: any) {
-    return { success: false, sessionCount: 0, messageCount: 0, error: err?.message || "Invalid JSON backup file" };
+    return { success: false, sessionCount: 0, messageCount: 0, chunkCount: 0, error: err?.message || "Invalid JSON backup file" };
   }
 }
 
 /**
- * Get quick stats on local system storage.
+ * Get quick stats on local system storage including preserved document chunks.
  */
-export function getLocalStats(): { totalSessions: number; totalMessages: number; lastSaved: string | null } {
+export function getLocalStats(): { totalSessions: number; totalMessages: number; totalChunks: number; lastSaved: string | null } {
   if (typeof window === "undefined") {
-    return { totalSessions: 0, totalMessages: 0, lastSaved: null };
+    return { totalSessions: 0, totalMessages: 0, totalChunks: 0, lastSaved: null };
   }
   try {
     const sessions = getLocalSessions();
     let totalMessages = 0;
+    let totalChunks = 0;
     for (const s of sessions) {
       totalMessages += (s.message_count || 0);
+      totalChunks += getLocalChunks(s.id).length;
     }
     const lastSaved = localStorage.getItem(LOCAL_BACKUP_META_KEY);
     return {
       totalSessions: sessions.length,
       totalMessages,
+      totalChunks,
       lastSaved,
     };
   } catch {
-    return { totalSessions: 0, totalMessages: 0, lastSaved: null };
+    return { totalSessions: 0, totalMessages: 0, totalChunks: 0, lastSaved: null };
   }
 }

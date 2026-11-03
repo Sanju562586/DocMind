@@ -573,7 +573,7 @@ async def list_sessions(request: Request):
 
 @app.post("/api/sessions/restore")
 async def restore_sessions(request: Request):
-    """Re-hydrate conversations from browser persistent client storage into database."""
+    """Re-hydrate conversations and document chunks from browser persistent client storage into database."""
     user = _get_user_info(request)
     try:
         body = await request.json()
@@ -583,6 +583,38 @@ async def restore_sessions(request: Request):
     if not store:
         raise HTTPException(status_code=503, detail="Storage backend not initialized")
     res = store.restore_session_data(sessions_data, user_id=user["user_id"])
+
+    # Re-index any restored document chunks in local retriever index
+    if retriever:
+        from chunker import Chunk
+        for s in sessions_data:
+            s_id = s.get("id") or s.get("session_id")
+            s_chunks = s.get("chunks", [])
+            if s_id and s_chunks:
+                chunk_objs = []
+                for c in s_chunks:
+                    if isinstance(c, dict):
+                        chunk_objs.append(
+                            Chunk(
+                                id=c.get("id", ""),
+                                text=c.get("text", ""),
+                                contextual_text=c.get("contextual_text", ""),
+                                parent_id=c.get("parent_id", ""),
+                                parent_text=c.get("parent_text", ""),
+                                doc_id=c.get("doc_id", ""),
+                                session_id=c.get("session_id", s_id),
+                                chunk_index=c.get("chunk_index", 0),
+                                parent_index=c.get("parent_index", 0),
+                                metadata=c.get("metadata", {}),
+                            )
+                        )
+                    else:
+                        chunk_objs.append(c)
+                try:
+                    await asyncio.to_thread(retriever.index_session_chunks, s_id, chunk_objs)
+                except Exception as idx_err:
+                    logger.debug("Failed re-indexing restored chunks for session %s: %s", s_id, idx_err)
+
     return {"status": "success", **res}
 
 
@@ -602,6 +634,7 @@ async def delete_all_sessions(request: Request):
                     except OSError:
                         pass
         retriever.delete_session_index(session["id"])
+        store.delete_chunks_for_session(session["id"])
     store.delete_all_sessions(user_id=user["user_id"])
     return {"status": "all_deleted", "user_id": user["user_id"]}
 
@@ -645,6 +678,7 @@ async def delete_session(session_id: str, request: Request):
                 except OSError:
                     pass
     retriever.delete_session_index(session_id)
+    store.delete_chunks_for_session(session_id)
     store.delete_session(session_id, user_id=user["user_id"])
     return {"status": "deleted", "session_id": session_id}
 
@@ -835,6 +869,73 @@ async def list_session_documents(session_id: str, request: Request):
     return store.list_session_documents(session_id, user_id=user["user_id"])
 
 
+@app.get("/api/sessions/{session_id}/chunks")
+async def get_session_chunks(session_id: str, request: Request):
+    """Retrieve document chunks for a session strictly from local SQLite storage."""
+    user = _get_user_info(request)
+    session = store.get_session(session_id, user_id=user["user_id"])
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or unauthorized")
+    chunks = store.get_chunks_for_session(session_id, user_id=user["user_id"])
+    return [
+        {
+            "id": getattr(c, "id", None) or (c.get("id") if isinstance(c, dict) else None),
+            "doc_id": getattr(c, "doc_id", None) or (c.get("doc_id") if isinstance(c, dict) else None),
+            "session_id": getattr(c, "session_id", None) or (c.get("session_id") if isinstance(c, dict) else None),
+            "chunk_index": getattr(c, "chunk_index", 0) if hasattr(c, "chunk_index") else (c.get("chunk_index", 0) if isinstance(c, dict) else 0),
+            "parent_index": getattr(c, "parent_index", 0) if hasattr(c, "parent_index") else (c.get("parent_index", 0) if isinstance(c, dict) else 0),
+            "text": getattr(c, "text", "") if hasattr(c, "text") else (c.get("text", "") if isinstance(c, dict) else ""),
+            "contextual_text": getattr(c, "contextual_text", "") if hasattr(c, "contextual_text") else (c.get("contextual_text", "") if isinstance(c, dict) else ""),
+            "parent_id": getattr(c, "parent_id", "") if hasattr(c, "parent_id") else (c.get("parent_id", "") if isinstance(c, dict) else ""),
+            "parent_text": getattr(c, "parent_text", "") if hasattr(c, "parent_text") else (c.get("parent_text", "") if isinstance(c, dict) else ""),
+            "metadata": getattr(c, "metadata", {}) if hasattr(c, "metadata") else (c.get("metadata", {}) if isinstance(c, dict) else {}),
+        }
+        for c in chunks
+    ]
+
+
+@app.post("/api/sessions/{session_id}/chunks/restore")
+async def restore_session_chunks(session_id: str, request: Request):
+    """Restore document chunks directly into local SQLite storage and retriever index."""
+    user = _get_user_info(request)
+    session = store.get_session(session_id, user_id=user["user_id"])
+    if not session:
+        store.ensure_session(session_id, title="Restored Conversation", user_id=user["user_id"])
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    chunks = body.get("chunks", [])
+    if chunks and store:
+        store.save_chunks(chunks)
+        if retriever:
+            from chunker import Chunk
+            chunk_objs = []
+            for c in chunks:
+                if isinstance(c, dict):
+                    chunk_objs.append(
+                        Chunk(
+                            id=c.get("id", ""),
+                            text=c.get("text", ""),
+                            contextual_text=c.get("contextual_text", ""),
+                            parent_id=c.get("parent_id", ""),
+                            parent_text=c.get("parent_text", ""),
+                            doc_id=c.get("doc_id", ""),
+                            session_id=c.get("session_id", session_id),
+                            chunk_index=c.get("chunk_index", 0),
+                            parent_index=c.get("parent_index", 0),
+                            metadata=c.get("metadata", {}),
+                        )
+                    )
+                else:
+                    chunk_objs.append(c)
+            try:
+                await asyncio.to_thread(retriever.index_session_chunks, session_id, chunk_objs)
+            except Exception as idx_err:
+                logger.debug("Failed re-indexing chunks for %s: %s", session_id, idx_err)
+    return {"status": "success", "count": len(chunks)}
+
+
 @app.delete("/api/documents/{doc_id}")
 async def delete_document(doc_id: str, request: Request):
     user = _get_user_info(request)
@@ -847,6 +948,7 @@ async def delete_document(doc_id: str, request: Request):
 
     session_id = doc["session_id"]
     store.delete_document(doc_id, user_id=user["user_id"])
+    store.delete_chunks_for_document(doc_id)
     retriever.remove_document_from_session(session_id, doc_id)
     if doc.get("file_path"):
         if storage:
@@ -1306,6 +1408,8 @@ async def ingest_url_to_session(
                 asyncio.to_thread(chunker.chunk_document, text, d_id, s_id, meta),
                 timeout=settings.parse_timeout,
             )
+            # Persist chunks to local storage only
+            await asyncio.to_thread(store.save_chunks, chunks)
             await asyncio.wait_for(
                 asyncio.to_thread(retriever.index_session_chunks, s_id, chunks),
                 timeout=settings.index_timeout,

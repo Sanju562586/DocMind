@@ -13,6 +13,8 @@ import {
   mergeSessions,
   mergeMessages,
   getAllSessionsWithMessages,
+  getLocalChunks,
+  saveLocalChunks,
 } from "./localStorageStore";
 
 const API_BASE = process.env.NEXT_PUBLIC_DIRECT_API === "true" && process.env.NEXT_PUBLIC_BACKEND_URL
@@ -366,6 +368,13 @@ export async function getSession(sessionId: string): Promise<Session> {
     const remote = await handleResponse<Session>(res, "Failed to fetch session");
     if (remote && remote.id) {
       saveLocalSession(remote);
+      // If session contains documents and local chunks are not yet cached, fetch and cache chunks locally
+      if (remote.documents && remote.documents.length > 0) {
+        const cachedChunks = getLocalChunks(sessionId);
+        if (cachedChunks.length === 0) {
+          getSessionChunks(sessionId).catch(() => {});
+        }
+      }
       return remote;
     }
   } catch (err) {
@@ -385,6 +394,34 @@ export async function deleteSession(sessionId: string): Promise<void> {
   }
 }
 
+export async function getSessionChunks(sessionId: string): Promise<any[]> {
+  const localChunks = getLocalChunks(sessionId);
+  try {
+    const res = await fetchWithRetry(`${API_BASE}/sessions/${sessionId}/chunks`);
+    const remoteChunks = await handleResponse<any[]>(res, "Failed to fetch session chunks");
+    if (Array.isArray(remoteChunks) && remoteChunks.length > 0) {
+      saveLocalChunks(sessionId, remoteChunks);
+      return remoteChunks;
+    }
+  } catch (err) {
+    console.debug("Remote getSessionChunks notice, serving from local storage:", err);
+  }
+  return localChunks;
+}
+
+export async function restoreSessionChunksToBackend(sessionId: string, chunks: any[]): Promise<void> {
+  if (!sessionId || !chunks || chunks.length === 0) return;
+  try {
+    await fetchWithRetry(`${API_BASE}/sessions/${sessionId}/chunks/restore`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chunks }),
+    });
+  } catch (err) {
+    console.debug("Remote restoreSessionChunks notice:", err);
+  }
+}
+
 export async function getMessages(sessionId: string): Promise<Message[]> {
   const localMsgs = getLocalMessages(sessionId);
   try {
@@ -398,7 +435,12 @@ export async function getMessages(sessionId: string): Promise<Message[]> {
       if (remoteMsgs.length < localMsgs.length) {
         const localSession = getLocalSessions().find((s) => s.id === sessionId);
         if (localSession) {
-          restoreSessionsToBackend([{ ...localSession, messages: merged }]).catch(() => {});
+          const localChunks = getLocalChunks(sessionId);
+          restoreSessionsToBackend([{
+            ...localSession,
+            messages: merged,
+            chunks: localChunks,
+          }]).catch(() => {});
         }
       }
       return merged;

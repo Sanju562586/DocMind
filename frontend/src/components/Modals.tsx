@@ -36,7 +36,7 @@ export function ApiKeyModal({ apiKeys, onSave, onClose, onRefreshSessions }: Api
       const res = await importChatsBackupJson(text);
       if (res.success) {
         setLocalStats(getLocalStats());
-        setBackupStatus(`✓ Restored ${res.sessionCount} conversations (${res.messageCount} messages)`);
+        setBackupStatus(`✓ Restored ${res.sessionCount} conversations (${res.messageCount} messages, ${res.chunkCount || 0} chunks)`);
         onRefreshSessions?.();
         setTimeout(() => setBackupStatus(null), 4000);
       } else {
@@ -340,41 +340,54 @@ export function ApiKeyModal({ apiKeys, onSave, onClose, onRefreshSessions }: Api
                 marginBottom: 12,
               }}
             >
-              All conversations and messages are stored directly in your browser&apos;s local storage on this computer and synchronized with the backend. Even if the cloud server sleeps or your free-tier PostgreSQL database pauses after inactivity, your chats remain completely preserved on this machine.
+              All conversations, messages, and document chunks are stored directly in your browser&apos;s local storage on this computer and kept strictly in local storage on the server. Even if the cloud server sleeps or your free-tier PostgreSQL database pauses after inactivity, your chats and document chunks remain completely preserved on this machine.
             </p>
 
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns: "1fr 1fr",
+                gridTemplateColumns: "1fr 1fr 1fr",
                 gap: 8,
                 marginBottom: 12,
               }}
             >
               <div
                 style={{
-                  padding: "8px 12px",
+                  padding: "8px 10px",
                   borderRadius: 6,
                   background: "rgba(255, 255, 255, 0.03)",
                   border: "1px solid rgba(255, 255, 255, 0.06)",
                 }}
               >
                 <div style={{ fontSize: 10, color: "rgba(255, 255, 255, 0.45)" }}>Preserved Chats</div>
-                <div style={{ fontSize: 14, fontWeight: 600, color: "#fff", marginTop: 2 }}>
-                  {localStats.totalSessions} Conversations
+                <div style={{ fontSize: 13, fontWeight: 600, color: "#fff", marginTop: 2 }}>
+                  {localStats.totalSessions} Chats
                 </div>
               </div>
               <div
                 style={{
-                  padding: "8px 12px",
+                  padding: "8px 10px",
                   borderRadius: 6,
                   background: "rgba(255, 255, 255, 0.03)",
                   border: "1px solid rgba(255, 255, 255, 0.06)",
                 }}
               >
                 <div style={{ fontSize: 10, color: "rgba(255, 255, 255, 0.45)" }}>Preserved Messages</div>
-                <div style={{ fontSize: 14, fontWeight: 600, color: "#fff", marginTop: 2 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: "#fff", marginTop: 2 }}>
                   {localStats.totalMessages} Messages
+                </div>
+              </div>
+              <div
+                style={{
+                  padding: "8px 10px",
+                  borderRadius: 6,
+                  background: "rgba(255, 255, 255, 0.03)",
+                  border: "1px solid rgba(255, 255, 255, 0.06)",
+                }}
+              >
+                <div style={{ fontSize: 10, color: "rgba(255, 255, 255, 0.45)" }}>Local Chunks</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: "#10b981", marginTop: 2 }}>
+                  {localStats.totalChunks} Chunks
                 </div>
               </div>
             </div>
